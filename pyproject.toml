@@ -1,0 +1,76 @@
+[tool.poetry]
+name = "padel-backend"
+version = "1.0.0"
+description = "Backend API for Padel scoring and tournament management"
+authors = ["Your Name <your.email@example.com>"]
+readme = "README.md"
+packages = [{include = "padel_backend"}, {include = "apps"}]
+
+[tool.poetry.dependencies]
+python = "^3.12"
+Django = "4.2.7"
+djangorestframework = "3.14.0"
+django-cors-headers = "4.3.1"
+django-filter = "25.1"
+channels = "4.2.2"
+psycopg2-binary = "2.9.7"
+firebase-admin = "6.2.0"
+python-decouple = "3.8"
+Pillow = "10.1.0"
+PyJWT = "2.8.0"
+google-api-python-client = "2.177.0"
+google-cloud-firestore = "2.21.0"
+google-cloud-storage = "3.2.0"
+pytz = "2025.2"
+requests = "2.32.4"
+django-extensions = "^3.2.0"    
+pydotplus = "^2.0.2"       
+pyparsing = "^3.0.9" 
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^7.4.0"
+pytest-django = "^4.5.2"
+black = "^23.0.0"
+flake8 = "^6.0.0"
+isort = "^5.12.0"
+coverage = "^7.2.0"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.black]
+line-length = 88
+target-version = ['py312']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | migrations
+)/
+'''
+
+[tool.isort]
+profile = "black"
+multi_line_output = 3
+line_length = 88
+skip = ["migrations"]
+
+[tool.coverage.run]
+source = "."
+omit = [
+    "*/migrations/*",
+    "*/venv/*",
+    "*/env/*",
+    "manage.py",
+    "*/settings/*",
+    "*/tests/*",
+]

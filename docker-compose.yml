@@ -1,0 +1,94 @@
+version: '3.8'
+
+services:
+  web:
+    build: .
+    container_name: padel_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app
+      - media_volume:/app/media
+      - static_volume:/app/static
+    environment:
+      - DEBUG=1
+      - DB_NAME=padel_db
+      - DB_USER=postgres
+      - DB_PASSWORD=123456789a
+      - DB_HOST=db
+      - DB_PORT=5432
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - padel_network
+    restart: unless-stopped
+
+  db:
+    image: postgres:15
+    container_name: padel_postgres
+    environment:
+      POSTGRES_DB: padel_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: 123456789a
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - padel_network
+    restart: unless-stopped
+
+  redis:
+    image: redis:7-alpine
+    container_name: padel_redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    networks:
+      - padel_network
+    restart: unless-stopped
+
+  # Optional: Nginx for production
+  nginx:
+    image: nginx:alpine
+    container_name: padel_nginx
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./docker/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - static_volume:/app/static
+      - media_volume:/app/media
+    depends_on:
+      - web
+    networks:
+      - padel_network
+    restart: unless-stopped
+    profiles:
+      - production
+
+volumes:
+  postgres_data:  # Cambiar mysql_data por postgres_data
+  redis_data:
+  media_volume:
+  static_volume:
+
+networks:
+  padel_network:
+    driver: bridge

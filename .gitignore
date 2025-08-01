@@ -1,0 +1,47 @@
+# Django Backend - .gitignore Limpio
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Entornos virtuales
+.venv/
+venv/
+env/
+
+# Django
+*.log
+db.sqlite3
+media/uploads/
+staticfiles/
+
+# IDE - PyCharm/IntelliJ
+.idea/
+*.iws
+*.iml
+*.ipr
+
+# IDE - VS Code
+.vscode/
+*.code-workspace
+
+# OS
+.DS_Store
+Thumbs.db
+*~
+
+# Flutter - Ignorar TODO
+flutter_app/
+flutter_sdk/
+fluttersdk/
+*.dart
+
+# Temporales y basura
+*.tmp
+*.backup
+*.bak
+*.orig
+j
+logs/
