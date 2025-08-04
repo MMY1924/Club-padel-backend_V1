@@ -4,16 +4,118 @@ from django.db import transaction
 from django.utils import timezone
 from .models import Partido, Set, Juego, Punto
 import logging
+from apps.scoring.models import HistorialJugador, EstadisticasJugador
+from django.db import transaction
 
 logger = logging.getLogger(__name__)
+
+def crear_historial_y_actualizar_estadisticas(partido):
+    """Crea historial para los jugadores del partido y actualiza sus estadísticas"""
+    from apps.players.models import Jugador  # import local para evitar ciclos
+
+    jugadores = partido.get_jugadores_list()
+    equipo_ganador = partido.equipo_ganador
+
+    with transaction.atomic():
+        # 1. Crear registros en historial
+        for jugador in jugadores:
+            equipo = 1 if jugador in [partido.jugador1_equipo1, partido.jugador2_equipo1] else 2
+            HistorialJugador.objects.create(
+                jugador=jugador,
+                partido=partido,
+                es_ganador=(equipo == equipo_ganador),
+                equipo_jugador=equipo,
+                Pareja=partido.jugador2_equipo1 if equipo == 1 else partido.jugador2_equipo2,
+                sets_ganados=0,  # TODO: reemplazar con conteo real
+                sets_perdidos=0,
+                juegos_ganados=0,
+                juegos_perdidos=0,
+                puntos_ganados=0,
+                puntos_perdidos=0,
+                fecha_partido=partido.fecha_fin or partido.fecha_inicio or timezone.now()
+            )
+
+        # 2. Recalcular estadísticas de cada jugador
+        for jugador in jugadores:
+            actualizar_estadisticas_jugador(jugador)
+
+def actualizar_estadisticas_jugador(jugador):
+    """Recalcula las estadísticas de un jugador en base a su historial"""
+    historial = HistorialJugador.objects.filter(jugador=jugador)
+    if not historial.exists():
+        return
+
+    estadisticas, created = EstadisticasJugador.objects.get_or_create(jugador=jugador)
+
+    estadisticas.partidos_jugados = historial.count()
+    estadisticas.partidos_ganados = historial.filter(es_ganador=True).count()
+    estadisticas.partidos_perdidos = estadisticas.partidos_jugados - estadisticas.partidos_ganados
+
+    # Sets
+    estadisticas.sets_ganados = sum(h.sets_ganados for h in historial)
+    estadisticas.sets_perdidos = sum(h.sets_perdidos for h in historial)
+    estadisticas.sets_jugados = estadisticas.sets_ganados + estadisticas.sets_perdidos
+
+    # Juegos
+    estadisticas.juegos_ganados = sum(h.juegos_ganados for h in historial)
+    estadisticas.juegos_perdidos = sum(h.juegos_perdidos for h in historial)
+    estadisticas.juegos_jugados = estadisticas.juegos_ganados + estadisticas.juegos_perdidos
+
+    # Puntos
+    estadisticas.puntos_ganados = sum(h.puntos_ganados for h in historial)
+    estadisticas.puntos_perdidos = sum(h.puntos_perdidos for h in historial)
+    estadisticas.puntos_jugados = estadisticas.puntos_ganados + estadisticas.puntos_perdidos
+
+    # Fechas
+    estadisticas.primer_partido = historial.order_by('fecha_partido').first().fecha_partido
+    estadisticas.ultimo_partido = historial.order_by('-fecha_partido').first().fecha_partido
+
+    estadisticas.save()
 
 
 class PadelScoringService:
     def __init__(self, partido_id):
         self.partido = Partido.objects.get(id=partido_id)
 
+    def _ensure_active_set_and_game(self):
+        """
+        Garantiza que el partido tenga al menos un set y un juego activos.
+        Si no existen, los crea automáticamente.
+        """
+        if not self.partido.sets.exists():
+            set_inicial = Set.objects.create(
+                partido=self.partido,
+                numero_set=1,
+                juegos_equipo1=0,
+                juegos_equipo2=0,
+                finalizado=False
+            )
+            Juego.objects.create(
+                set=set_inicial,
+                numero_juego=1,
+                puntos_equipo1=0,
+                puntos_equipo2=0,
+                finalizado=False,
+                equipo_que_saca=1
+            )
+            logger.info(f"Partido {self.partido.id}: Set y juego inicial creados automáticamente.")
+        else:
+            set_activo = self.partido.sets.filter(finalizado=False).first()
+            if set_activo and not set_activo.juegos.exists():
+                Juego.objects.create(
+                    set=set_activo,
+                    numero_juego=1,
+                    puntos_equipo1=0,
+                    puntos_equipo2=0,
+                    finalizado=False,
+                    equipo_que_saca=1
+                )
+                logger.info(
+                    f"Partido {self.partido.id}: Juego inicial creado automáticamente en el Set {set_activo.numero_set}.")
+
     @staticmethod
     def create_match(match_data):
+        from .models import Partido
         """Crear partido nuevo con estructura inicial"""
         with transaction.atomic():
             partido = Partido.objects.create(**match_data)
@@ -37,23 +139,23 @@ class PadelScoringService:
             return partido
 
     def start_match(self):
-        """Iniciar partido"""
-        with transaction.atomic():
-            if self.partido.estado != 'Pendiente':
-                raise ValueError("El partido ya fue iniciado")
+        if self.partido.estado != 'Pendiente':
+            raise ValueError("Solo se pueden iniciar partidos pendientes")
 
-            self.partido.estado = 'En Juego'
-            self.partido.fecha_inicio = timezone.now()
-            self.partido.save()
+        self.partido.estado = 'En Juego'
+        self.partido.fecha_inicio = timezone.now()
+        self.partido.save()
 
-            logger.info(f"Partido iniciado: {self.partido}")
-            return True
+        # Asegurar que haya set y juego activos
+        self._ensure_active_set_and_game()
 
     def add_point(self, equipo_ganador, descripcion=''):
         """Agregar punto con información detallada de resultados"""
         with transaction.atomic():
             if self.partido.estado not in ['En Juego']:
                 raise ValueError("El partido no está en progreso")
+
+            self._ensure_active_set_and_game()
 
             if equipo_ganador not in [1, 2]:
                 raise ValueError("equipo_ganador debe ser 1 o 2")
@@ -170,11 +272,12 @@ class PadelScoringService:
         return None
 
     def _check_game_completion(self, juego):
-        """Verificar si el juego está completo"""
+        """Verificar si el juego está completo usando la configuración del partido"""
         p1, p2 = juego.puntos_equipo1, juego.puntos_equipo2
+        puntos_para_ganar = self.partido.puntos_para_ganar_juego
+        diferencia_minima = self.partido.diferencia_minima_puntos
 
-        # Juego normal (4 puntos y 2 de diferencia)
-        if (p1 >= 4 or p2 >= 4) and abs(p1 - p2) >= 2:
+        if (p1 >= puntos_para_ganar or p2 >= puntos_para_ganar) and abs(p1 - p2) >= diferencia_minima:
             return True
 
         return False
@@ -201,11 +304,12 @@ class PadelScoringService:
         logger.info(f"Juego completado: {juego} - Ganador: Equipo {ganador}")
 
     def _check_set_completion(self, set_obj):
-        """Verificar si el set está completo"""
+        """Verificar si el set está completo usando la configuración del partido"""
         j1, j2 = set_obj.juegos_equipo1, set_obj.juegos_equipo2
+        juegos_para_ganar = self.partido.juegos_para_ganar_set
+        diferencia_minima = self.partido.diferencia_minima_juegos
 
-        # Set normal (6 juegos y 2 de diferencia)
-        if (j1 >= 6 or j2 >= 6) and abs(j1 - j2) >= 2:
+        if (j1 >= juegos_para_ganar or j2 >= juegos_para_ganar) and abs(j1 - j2) >= diferencia_minima:
             return True
 
         return False

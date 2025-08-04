@@ -4,6 +4,10 @@ from django.db import models
 from django.core.validators import EmailValidator, MinValueValidator, MaxValueValidator
 from django.core.exceptions import ValidationError
 from apps.players.models import Jugador
+import logging
+logger = logging.getLogger(__name__)
+
+
 
 class Cancha(models.Model):
     ESTADO_CHOICES = [
@@ -113,8 +117,16 @@ class Partido(models.Model):
     tipo = models.CharField(max_length=10, choices=TIPO_CHOICES, default='Amistoso')
 
     # Configuración del partido
-    sets_para_ganar = models.PositiveIntegerField(default=2, validators=[MinValueValidator(1), MaxValueValidator(5)])
-    juegos_para_ganar_set = models.PositiveIntegerField(default=6)
+    sets_para_ganar = models.IntegerField(default=2)
+
+    # NUEVOS CAMPOS PARA CONFIGURAR REGLAS
+    puntos_para_ganar_juego = models.IntegerField(default=4)  # Ej: 4 (juego normal)
+    diferencia_minima_puntos = models.IntegerField(default=2)  # Ej: 2 (ventaja)
+    juegos_para_ganar_set = models.IntegerField(default=6)  # Ej: 6 (set normal)
+    diferencia_minima_juegos = models.IntegerField(default=2)  # Ej: 2 (ventaja en juegos)
+
+    def __str__(self):
+        return f"{self.equipo1_nombre} vs {self.equipo2_nombre} ({self.estado})"
 
     # Metadatos
     fecha_inicio = models.DateTimeField(null=True, blank=True)
@@ -152,12 +164,16 @@ class Partido(models.Model):
 
     # NUEVOS MÉTODOS AUXILIARES
     def get_jugadores_list(self):
-        """Retorna lista de jugadores sin duplicados ni None"""
-        jugadores = [self.jugador1_equipo1.id, self.jugador1_equipo2.id]
+        """Retorna lista de objetos Jugador sin duplicados ni None"""
+        jugadores = []
+        if self.jugador1_equipo1:
+            jugadores.append(self.jugador1_equipo1)
+        if self.jugador1_equipo2:
+            jugadores.append(self.jugador1_equipo2)
         if self.jugador2_equipo1:
-            jugadores.append(self.jugador2_equipo1.id)
+            jugadores.append(self.jugador2_equipo1)
         if self.jugador2_equipo2:
-            jugadores.append(self.jugador2_equipo2.id)
+            jugadores.append(self.jugador2_equipo2)
         return jugadores
 
     def get_equipo_jugadores(self, equipo):
@@ -175,8 +191,21 @@ class Partido(models.Model):
         return []
 
     def save(self, *args, **kwargs):
-        self.clean()
-        super().save(*args, **kwargs)
+        estado_anterior = None
+        if self.pk:
+            estado_anterior = Partido.objects.filter(pk=self.pk).values_list('estado', flat=True).first()
+
+        super().save(*args, **kwargs)  # Guardar primero
+
+        # Si el estado cambia a "En Juego", aseguramos set y juego
+        if self.estado == "En Juego" and estado_anterior != "En Juego":
+            from .services import PadelScoringService
+            try:
+                servicio = PadelScoringService(self.id)
+                servicio._ensure_active_set_and_game()
+                logger.info(f"Partido {self.id}: Estructura inicial asegurada automáticamente.")
+            except Exception as e:
+                logger.error(f"Error asegurando estructura para el partido {self.id}: {e}")
 
     # MÉTODOS EXISTENTES MODIFICADOS
     def __str__(self):
@@ -568,6 +597,8 @@ class Reserva(models.Model):
 
     def __str__(self):
         return f"Reserva {self.codigo_reserva} - {self.cancha.nombre}"
+
+
 
 
 

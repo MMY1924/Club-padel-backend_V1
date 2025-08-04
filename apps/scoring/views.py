@@ -1,929 +1,909 @@
 ﻿# apps/scoring/views.py
-from rest_framework import viewsets, status
-from rest_framework.decorators import action, api_view
+
+from rest_framework import viewsets, status, filters
+from rest_framework.decorators import action, api_view, permission_classes
 from rest_framework.response import Response
-from django_filters.rest_framework import DjangoFilterBackend
-from rest_framework.filters import SearchFilter, OrderingFilter
-from django.db.models import Q, Count, Avg, Max, Sum
-from django.db.models.functions import Extract
-from django.utils import timezone
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from django.shortcuts import get_object_or_404
 from django.db import transaction
-from datetime import timedelta, datetime, time
-from django.http import JsonResponse
-from django.shortcuts import redirect
-from collections import defaultdict
+from django.utils import timezone
+from django.db.models import Q, Count, Avg
+from django_filters.rest_framework import DjangoFilterBackend
+from datetime import datetime, timedelta
+from .permissions import IsPlayerInMatch
+from rest_framework.decorators import action
+from rest_framework import status
+from apps.scoring.services import crear_historial_y_actualizar_estadisticas
 
 from .models import (
     Partido, Set, Juego, Punto, HistorialJugador, EstadisticasJugador,
     Cancha, Reserva
 )
 from .serializers import (
+    # Serializers de Cancha
+    CanchaSerializer, CanchaListSerializer, CanchaConReservasSerializer,
+    # Serializers de Partido
     PartidoSerializer, PartidoCreateSerializer, PartidoListSerializer,
+    # Serializers básicos
     SetSerializer, JuegoSerializer, PuntoSerializer,
     HistorialJugadorSerializer, EstadisticasJugadorSerializer,
-    CanchaSerializer, CanchaListSerializer,
-    AddPointSerializer, IniciarPartidoSerializer,
+    # Serializers de Reserva
     ReservaSerializer, ReservaListSerializer, ReservaCreateSerializer,
-    DisponibilidadSerializer, CalendarioReservasSerializer, CambiarEstadoReservaSerializer,
-    CanchaConReservasSerializer, CrearJugadorSerializer, CrearPartidoDesdeReservaSerializer
+    # Serializers de acciones
+    AddPointSerializer, IniciarPartidoSerializer, DisponibilidadSerializer,
+    CalendarioReservasSerializer, CambiarEstadoReservaSerializer,
+    CrearPartidoDesdeReservaSerializer
 )
+from .services import PadelScoringService
+from apps.players.models import Jugador
 
 
 # ==========================================
-# VIEWSET PARA CANCHAS
+# API ROOT VIEW
 # ==========================================
+
+@api_view(['GET'])
+@permission_classes([AllowAny])
+def api_root(request, format=None):
+    """Vista raíz de la API de Scoring"""
+    return Response({
+        'canchas': request.build_absolute_uri('/scoring/canchas/'),
+        'partidos': request.build_absolute_uri('/scoring/partidos/'),
+        'sets': request.build_absolute_uri('/scoring/sets/'),
+        'juegos': request.build_absolute_uri('/scoring/juegos/'),
+        'puntos': request.build_absolute_uri('/scoring/puntos/'),
+        'historial': request.build_absolute_uri('/scoring/historial/'),
+        'estadisticas': request.build_absolute_uri('/scoring/estadisticas/'),
+        'reservas': request.build_absolute_uri('/scoring/reservas/'),
+    })
+
+
+# ==========================================
+# VIEWSET DE CANCHA
+# ==========================================
+
 class CanchaViewSet(viewsets.ModelViewSet):
-    queryset = Cancha.objects.all()
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
+    """
+    ViewSet para gestión de canchas.
+
+    Endpoints:
+    - GET /canchas/ - Lista de canchas
+    - POST /canchas/ - Crear cancha
+    - GET /canchas/{id}/ - Detalle de cancha
+    - PUT/PATCH /canchas/{id}/ - Actualizar cancha
+    - DELETE /canchas/{id}/ - Eliminar cancha
+
+    Acciones personalizadas:
+    - GET /canchas/disponibles/ - Canchas disponibles ahora
+    - POST /canchas/{id}/cambiar_estado/ - Cambiar estado de cancha
+    - GET /canchas/{id}/disponibilidad/ - Ver disponibilidad
+    """
+
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['tipo', 'estado', 'activa', 'tiene_iluminacion']
     search_fields = ['nombre', 'descripcion']
     ordering_fields = ['numero', 'nombre', 'fecha_creacion']
     ordering = ['numero']
 
+    def get_queryset(self):
+        queryset = Cancha.objects.all()
+
+        # Filtro por activas
+        if self.request.query_params.get('solo_activas'):
+            queryset = queryset.filter(activa=True)
+
+        return queryset
+
     def get_serializer_class(self):
         if self.action == 'list':
             return CanchaListSerializer
+        elif self.action == 'retrieve' and self.request.query_params.get('incluir_reservas'):
+            return CanchaConReservasSerializer
         return CanchaSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve', 'disponibles', 'disponibilidad']:
+            return [AllowAny()]
+        return [IsAuthenticated()]
 
     @action(detail=False, methods=['get'])
     def disponibles(self, request):
-        """Obtener canchas disponibles"""
-        canchas = Cancha.objects.filter(
+        """Obtiene canchas disponibles en este momento"""
+        canchas = self.get_queryset().filter(
             estado='Disponible',
             activa=True
-        ).order_by('numero')
+        )
 
-        serializer = CanchaListSerializer(canchas, many=True)
-        return Response({
-            'canchas_disponibles': serializer.data,
-            'total': canchas.count()
-        })
+        # Excluir canchas con reservas activas
+        ahora = timezone.now()
+        canchas_ocupadas = Reserva.objects.filter(
+            fecha_inicio__lte=ahora,
+            fecha_fin__gte=ahora,
+            estado__in=['Confirmada', 'En_Uso']
+        ).values_list('cancha_id', flat=True)
 
-    @action(detail=False, methods=['get'])
-    def estadisticas(self, request):
-        """Estadísticas generales de canchas"""
-        total_canchas = Cancha.objects.filter(activa=True).count()
-        disponibles = Cancha.objects.filter(estado='Disponible', activa=True).count()
-        ocupadas = Cancha.objects.filter(estado='Ocupada', activa=True).count()
-        mantenimiento = Cancha.objects.filter(estado='Mantenimiento', activa=True).count()
+        canchas = canchas.exclude(id__in=canchas_ocupadas)
 
-        # Cancha más utilizada
-        cancha_mas_usada = Cancha.objects.filter(activa=True).annotate(
-            total_partidos=Count('partidos')
-        ).order_by('-total_partidos').first()
-
-        return Response({
-            'resumen': {
-                'total_canchas': total_canchas,
-                'disponibles': disponibles,
-                'ocupadas': ocupadas,
-                'en_mantenimiento': mantenimiento,
-                'fuera_servicio': total_canchas - disponibles - ocupadas - mantenimiento
-            },
-            'cancha_mas_utilizada': {
-                'nombre': cancha_mas_usada.nombre if cancha_mas_usada else None,
-                'total_partidos': cancha_mas_usada.total_partidos if cancha_mas_usada else 0
-            } if cancha_mas_usada else None
-        })
+        serializer = self.get_serializer(canchas, many=True)
+        return Response(serializer.data)
 
     @action(detail=True, methods=['post'])
     def cambiar_estado(self, request, pk=None):
-        """Cambiar estado de una cancha"""
+        """Cambia el estado de una cancha"""
         cancha = self.get_object()
         nuevo_estado = request.data.get('estado')
 
         if nuevo_estado not in dict(Cancha.ESTADO_CHOICES):
             return Response(
-                {'error': 'Estado no válido'},
+                {"detail": "Estado inválido"},
                 status=status.HTTP_400_BAD_REQUEST
             )
 
-        # Verificar si hay partidos activos
-        if nuevo_estado in ['Mantenimiento', 'Fuera_Servicio']:
-            partidos_activos = cancha.partidos.filter(estado__in=['Pendiente', 'En Juego'])
-            if partidos_activos.exists():
-                return Response(
-                    {'error': f'No se puede cambiar estado. Hay {partidos_activos.count()} partidos activos'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
+        # Validaciones especiales
+        if nuevo_estado == 'Ocupada' and cancha.partidos.filter(estado='En Juego').exists():
+            return Response(
+                {"detail": "La cancha ya tiene un partido en juego"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
         cancha.estado = nuevo_estado
         cancha.save()
 
         return Response({
-            'message': f'Estado de cancha cambiado a {nuevo_estado}',
-            'cancha': CanchaSerializer(cancha).data
+            "detail": f"Estado cambiado a {cancha.get_estado_display()}",
+            "estado": cancha.estado
         })
 
     @action(detail=True, methods=['get'])
-    def reservas(self, request, pk=None):
-        """Obtener reservas de una cancha específica"""
+    def disponibilidad(self, request, pk=None):
+        """Verifica disponibilidad de la cancha en una fecha"""
         cancha = self.get_object()
-
-        # Filtros opcionales
-        fecha = request.query_params.get('fecha')
-        estado = request.query_params.get('estado')
-
-        reservas = cancha.reservas.all()
-
-        if fecha:
-            try:
-                fecha_obj = datetime.strptime(fecha, '%Y-%m-%d').date()
-                reservas = reservas.filter(fecha_inicio__date=fecha_obj)
-            except ValueError:
-                return Response(
-                    {'error': 'Formato de fecha inválido. Use YYYY-MM-DD'},
-                    status=status.HTTP_400_BAD_REQUEST
-                )
-
-        if estado:
-            reservas = reservas.filter(estado=estado)
-
-        reservas = reservas.order_by('fecha_inicio')
-
-        page = self.paginate_queryset(reservas)
-        if page is not None:
-            serializer = ReservaListSerializer(page, many=True)
-            return self.get_paginated_response(serializer.data)
-
-        serializer = ReservaListSerializer(reservas, many=True)
-        return Response(serializer.data)
-
-    @action(detail=True, methods=['get'])
-    def calendario_cancha(self, request, pk=None):
-        """Calendario específico de una cancha"""
-        cancha = self.get_object()
-
-        # Obtener parámetros
-        fecha_inicio = request.query_params.get('fecha_inicio', timezone.now().date().strftime('%Y-%m-%d'))
-        fecha_fin = request.query_params.get('fecha_fin',
-                                             (timezone.now().date() + timedelta(days=7)).strftime('%Y-%m-%d'))
-
-        try:
-            fecha_inicio_obj = datetime.strptime(fecha_inicio, '%Y-%m-%d').date()
-            fecha_fin_obj = datetime.strptime(fecha_fin, '%Y-%m-%d').date()
-        except ValueError:
-            return Response(
-                {'error': 'Formato de fecha inválido. Use YYYY-MM-DD'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        # Obtener reservas
-        reservas = cancha.reservas.filter(
-            fecha_inicio__date__gte=fecha_inicio_obj,
-            fecha_inicio__date__lte=fecha_fin_obj,
-            estado__in=['Confirmada', 'En_Uso', 'Pendiente']
-        ).order_by('fecha_inicio')
-
-        # Organizar por días
-        calendario = defaultdict(list)
-        for reserva in reservas:
-            fecha_str = reserva.fecha_inicio.date().strftime('%Y-%m-%d')
-            calendario[fecha_str].append({
-                'id': reserva.id,
-                'codigo': reserva.codigo_reserva,
-                'hora_inicio': reserva.fecha_inicio.strftime('%H:%M'),
-                'hora_fin': reserva.fecha_fin.strftime('%H:%M'),
-                # 'cliente': reserva.cliente.nombre_completo,  # COMENTADO - requiere Cliente
-                'tipo_reserva': reserva.tipo_reserva,
-                'estado': reserva.estado,
-                'numero_jugadores': reserva.numero_jugadores
-            })
-
-        return Response({
-            'cancha': {
-                'id': cancha.id,
-                'nombre': cancha.nombre,
-                'numero': cancha.numero
-            },
-            'fecha_inicio': fecha_inicio,
-            'fecha_fin': fecha_fin,
-            'calendario': dict(calendario)
-        })
-
-
-# ==========================================
-# VIEWSET PARA PARTIDOS
-# ==========================================
-class PartidoViewSet(viewsets.ModelViewSet):
-    queryset = Partido.objects.all()
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['modalidad', 'estado', 'tipo', 'equipo_ganador', 'cancha']
-    search_fields = [
-        'jugador1_equipo1__nombre', 'jugador1_equipo1__apellido',
-        'jugador2_equipo1__nombre', 'jugador2_equipo1__apellido',
-        'jugador1_equipo2__nombre', 'jugador1_equipo2__apellido',
-        'jugador2_equipo2__nombre', 'jugador2_equipo2__apellido',
-        'cancha__nombre'
-    ]
-    ordering_fields = ['fecha_creacion', 'fecha_inicio', 'fecha_fin']
-    ordering = ['-fecha_creacion']
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return PartidoCreateSerializer
-        elif self.action == 'list':
-            return PartidoListSerializer
-        return PartidoSerializer
-
-    def create(self, request, *args, **kwargs):
-        """Crear partido con validaciones"""
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        try:
-            with transaction.atomic():
-                partido = serializer.save()
-
-                response_serializer = PartidoSerializer(partido)
-                return Response(
-                    {
-                        'message': f'Partido {partido.modalidad.lower()} creado exitosamente',
-                        'partido': response_serializer.data
-                    },
-                    status=status.HTTP_201_CREATED
-                )
-        except Exception as e:
-            return Response(
-                {'error': f'Error al crear partido: {str(e)}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    @action(detail=True, methods=['post'])
-    def iniciar_partido(self, request, pk=None):
-        """Iniciar partido - funciona para Individual y Dobles"""
-        partido = self.get_object()
-
-        serializer = IniciarPartidoSerializer(
-            data={},
-            context={'partido': partido}
-        )
-        serializer.is_valid(raise_exception=True)
-
-        try:
-            with transaction.atomic():
-                # Actualizar estado del partido
-                partido.estado = 'En Juego'
-                partido.fecha_inicio = timezone.now()
-                partido.save()
-
-                # Actualizar estado de cancha
-                if partido.cancha:
-                    partido.cancha.estado = 'Ocupada'
-                    partido.cancha.save()
-
-                # Crear primer set
-                primer_set = Set.objects.create(
-                    partido=partido,
-                    numero_set=1,
-                    juegos_equipo1=0,
-                    juegos_equipo2=0,
-                    finalizado=False
-                )
-
-                # Crear primer juego
-                primer_juego = Juego.objects.create(
-                    set=primer_set,
-                    numero_juego=1,
-                    puntos_equipo1=0,
-                    puntos_equipo2=0,
-                    equipo_que_saca=1,  # Empieza sacando equipo 1
-                    finalizado=False
-                )
-
-                return Response({
-                    'message': f'Partido {partido.modalidad.lower()} iniciado correctamente',
-                    'partido_id': partido.id,
-                    'modalidad': partido.modalidad,
-                    'equipo1': partido.equipo1_nombre,
-                    'equipo2': partido.equipo2_nombre,
-                    'cancha': partido.cancha.nombre if partido.cancha else None,
-                    'set_actual': primer_set.numero_set,
-                    'juego_actual': primer_juego.numero_juego,
-                    'quien_saca': primer_juego.equipo_que_saca
-                })
-
-        except Exception as e:
-            return Response(
-                {'error': f'Error al iniciar partido: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    @action(detail=True, methods=['post'])
-    def add_point(self, request, pk=None):
-        """Agregar punto al partido"""
-        partido = self.get_object()
-
-        if partido.estado != 'En Juego':
-            return Response(
-                {'error': 'Solo se pueden agregar puntos a partidos en juego'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        serializer = AddPointSerializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        equipo_ganador = serializer.validated_data['equipo_ganador']
-        tipo_punto = serializer.validated_data.get('tipo_punto', 'Punto')
-        descripcion = serializer.validated_data.get('descripcion', '')
-
-        try:
-            with transaction.atomic():
-                # Obtener set y juego actual
-                set_actual = partido.sets.filter(finalizado=False).last()
-                if not set_actual:
-                    return Response(
-                        {'error': 'No hay sets activos'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                juego_actual = set_actual.juegos.filter(finalizado=False).last()
-                if not juego_actual:
-                    return Response(
-                        {'error': 'No hay juegos activos'},
-                        status=status.HTTP_400_BAD_REQUEST
-                    )
-
-                # Crear el punto
-                numero_punto = juego_actual.puntos.count() + 1
-                punto = Punto.objects.create(
-                    juego=juego_actual,
-                    equipo_ganador=equipo_ganador,
-                    tipo_punto=tipo_punto,
-                    descripcion=descripcion,
-                    numero_punto=numero_punto
-                )
-
-                # Actualizar puntuación del juego
-                if equipo_ganador == 1:
-                    juego_actual.puntos_equipo1 += 1
-                else:
-                    juego_actual.puntos_equipo2 += 1
-
-                # Verificar si el juego terminó
-                juego_terminado = self._verificar_juego_terminado(juego_actual)
-                if juego_terminado:
-                    juego_actual.finalizado = True
-                    juego_actual.equipo_ganador = juego_terminado
-                    juego_actual.fecha_fin = timezone.now()
-
-                    # Actualizar puntuación del set
-                    if juego_terminado == 1:
-                        set_actual.juegos_equipo1 += 1
-                    else:
-                        set_actual.juegos_equipo2 += 1
-
-                    # Verificar si el set terminó
-                    set_terminado = self._verificar_set_terminado(set_actual, partido)
-                    if set_terminado:
-                        set_actual.finalizado = True
-                        set_actual.equipo_ganador = set_terminado
-                        set_actual.fecha_fin = timezone.now()
-
-                        # Verificar si el partido terminó
-                        partido_terminado = self._verificar_partido_terminado(partido)
-                        if partido_terminado:
-                            partido.estado = 'Finalizado'
-                            partido.equipo_ganador = partido_terminado
-                            partido.fecha_fin = timezone.now()
-
-                            # Liberar cancha
-                            if partido.cancha:
-                                partido.cancha.estado = 'Disponible'
-                                partido.cancha.save()
-
-                            partido.save()
-                        else:
-                            # Crear nuevo set
-                            nuevo_numero_set = set_actual.numero_set + 1
-                            nuevo_set = Set.objects.create(
-                                partido=partido,
-                                numero_set=nuevo_numero_set,
-                                juegos_equipo1=0,
-                                juegos_equipo2=0,
-                                finalizado=False
-                            )
-
-                            # Crear primer juego del nuevo set
-                            Juego.objects.create(
-                                set=nuevo_set,
-                                numero_juego=1,
-                                puntos_equipo1=0,
-                                puntos_equipo2=0,
-                                equipo_que_saca=1 if juego_actual.equipo_que_saca == 2 else 2,
-                                finalizado=False
-                            )
-                    else:
-                        # Crear nuevo juego
-                        nuevo_numero_juego = juego_actual.numero_juego + 1
-                        Juego.objects.create(
-                            set=set_actual,
-                            numero_juego=nuevo_numero_juego,
-                            puntos_equipo1=0,
-                            puntos_equipo2=0,
-                            equipo_que_saca=1 if juego_actual.equipo_que_saca == 2 else 2,
-                            finalizado=False
-                        )
-
-                    set_actual.save()
-
-                juego_actual.save()
-
-                return Response({
-                    'message': 'Punto agregado correctamente',
-                    'punto_id': punto.id,
-                    'juego_terminado': juego_actual.finalizado,
-                    'set_terminado': set_actual.finalizado if juego_actual.finalizado else False,
-                    'partido_terminado': partido.estado == 'Finalizado'
-                })
-
-        except Exception as e:
-            return Response(
-                {'error': f'Error al agregar punto: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    @action(detail=True, methods=['get'])
-    def live_score(self, request, pk=None):
-        """Score en tiempo real"""
-        partido = self.get_object()
-
-        if partido.estado not in ['En Juego', 'Finalizado']:
-            return Response({
-                'partido_id': partido.id,
-                'modalidad': partido.modalidad,
-                'estado': partido.estado,
-                'mensaje': 'Partido no iniciado'
-            })
-
-        try:
-            sets = partido.sets.all().order_by('numero_set')
-            set_actual = sets.filter(finalizado=False).first()
-
-            score_data = {
-                'partido_id': partido.id,
-                'modalidad': partido.modalidad,
-                'estado': partido.estado,
-                'equipo1_info': {
-                    'jugadores': partido.equipo1_nombre,
-                    'sets_ganados': sets.filter(equipo_ganador=1).count()
-                },
-                'equipo2_info': {
-                    'jugadores': partido.equipo2_nombre,
-                    'sets_ganados': sets.filter(equipo_ganador=2).count()
-                },
-                'cancha_info': {
-                    'nombre': partido.cancha.nombre if partido.cancha else None,
-                    'numero': partido.cancha.numero if partido.cancha else None
-                },
-                'sets_detalle': [],
-                'set_actual': None,
-                'juego_actual': None
-            }
-
-            # Detalle de sets
-            for set_obj in sets:
-                score_data['sets_detalle'].append({
-                    'numero': set_obj.numero_set,
-                    'juegos_equipo1': set_obj.juegos_equipo1,
-                    'juegos_equipo2': set_obj.juegos_equipo2,
-                    'finalizado': set_obj.finalizado,
-                    'equipo_ganador': set_obj.equipo_ganador
-                })
-
-            # Set actual
-            if set_actual:
-                juego_actual = set_actual.juegos.filter(finalizado=False).first()
-
-                score_data['set_actual'] = {
-                    'numero': set_actual.numero_set,
-                    'juegos_equipo1': set_actual.juegos_equipo1,
-                    'juegos_equipo2': set_actual.juegos_equipo2
-                }
-
-                # Juego actual con conversión de puntos
-                if juego_actual:
-                    score_data['juego_actual'] = {
-                        'numero': juego_actual.numero_juego,
-                        'puntos_equipo1': juego_actual.puntos_display_equipo1,
-                        'puntos_equipo2': juego_actual.puntos_display_equipo2,
-                        'quien_saca': juego_actual.equipo_que_saca
-                    }
-
-            return Response(score_data)
-
-        except Exception as e:
-            return Response(
-                {'error': f'Error al obtener score: {str(e)}'},
-                status=status.HTTP_500_INTERNAL_SERVER_ERROR
-            )
-
-    @action(detail=False, methods=['get'])
-    def estadisticas_modalidades(self, request):
-        """Estadísticas por modalidad de partido"""
-        stats = Partido.objects.values('modalidad', 'estado').annotate(
-            cantidad=Count('id')
-        ).order_by('modalidad', 'estado')
-
-        estadisticas = {
-            'Individual': {'Pendiente': 0, 'En Juego': 0, 'Finalizado': 0, 'Cancelado': 0},
-            'Dobles': {'Pendiente': 0, 'En Juego': 0, 'Finalizado': 0, 'Cancelado': 0}
-        }
-
-        for stat in stats:
-            modalidad = stat['modalidad']
-            estado = stat['estado']
-            cantidad = stat['cantidad']
-            estadisticas[modalidad][estado] = cantidad
-
-        total_individual = sum(estadisticas['Individual'].values())
-        total_dobles = sum(estadisticas['Dobles'].values())
-        total_general = total_individual + total_dobles
-
-        return Response({
-            'estadisticas_detalladas': estadisticas,
-            'totales': {
-                'Individual': total_individual,
-                'Dobles': total_dobles,
-                'Total': total_general
-            },
-            'porcentajes': {
-                'Individual': round((total_individual / total_general * 100), 2) if total_general > 0 else 0,
-                'Dobles': round((total_dobles / total_general * 100), 2) if total_general > 0 else 0
-            }
-        })
-
-    # ==========================================
-    # MÉTODOS AUXILIARES PRIVADOS
-    # ==========================================
-    def _verificar_juego_terminado(self, juego):
-        """Verificar si un juego ha terminado según reglas de tenis"""
-        puntos1 = juego.puntos_equipo1
-        puntos2 = juego.puntos_equipo2
-
-        # Mínimo 4 puntos para ganar y diferencia de 2
-        if puntos1 >= 4 and puntos1 - puntos2 >= 2:
-            return 1
-        elif puntos2 >= 4 and puntos2 - puntos1 >= 2:
-            return 2
-
-        return None
-
-    def _verificar_set_terminado(self, set_obj, partido):
-        """Verificar si un set ha terminado"""
-        juegos1 = set_obj.juegos_equipo1
-        juegos2 = set_obj.juegos_equipo2
-        min_juegos = partido.juegos_para_ganar_set
-
-        # Ganar por diferencia de 2 juegos
-        if juegos1 >= min_juegos and juegos1 - juegos2 >= 2:
-            return 1
-        elif juegos2 >= min_juegos and juegos2 - juegos1 >= 2:
-            return 2
-
-        # Caso especial: 7-5
-        if (juegos1 == min_juegos + 1 and juegos2 == min_juegos - 1):
-            return 1
-        elif (juegos2 == min_juegos + 1 and juegos1 == min_juegos - 1):
-            return 2
-
-        return None
-
-    def _verificar_partido_terminado(self, partido):
-        """Verificar si un partido ha terminado"""
-        sets_ganados_1 = partido.sets.filter(equipo_ganador=1).count()
-        sets_ganados_2 = partido.sets.filter(equipo_ganador=2).count()
-        sets_para_ganar = partido.sets_para_ganar
-
-        if sets_ganados_1 >= sets_para_ganar:
-            return 1
-        elif sets_ganados_2 >= sets_para_ganar:
-            return 2
-
-        return None
-
-
-# ==========================================
-# VIEWSET PARA RESERVAS (SIMPLIFICADO)
-# ==========================================
-class ReservaViewSet(viewsets.ModelViewSet):
-    queryset = Reserva.objects.all()
-    filter_backends = [DjangoFilterBackend, SearchFilter, OrderingFilter]
-    filterset_fields = ['cancha', 'estado', 'tipo_reserva', 'pagado']
-    search_fields = ['codigo_reserva', 'cancha__nombre']
-    ordering_fields = ['fecha_inicio', 'fecha_creacion', 'precio_total']
-    ordering = ['-fecha_inicio']
-
-    def get_serializer_class(self):
-        if self.action == 'create':
-            return ReservaCreateSerializer
-        elif self.action == 'list':
-            return ReservaListSerializer
-        return ReservaSerializer
-
-    def create(self, request, *args, **kwargs):
-        """Crear nueva reserva con validaciones"""
-        serializer = self.get_serializer(data=request.data)
-        serializer.is_valid(raise_exception=True)
-
-        try:
-            with transaction.atomic():
-                reserva = serializer.save()
-
-                response_serializer = ReservaSerializer(reserva)
-                return Response(
-                    {
-                        'message': f'Reserva {reserva.codigo_reserva} creada exitosamente',
-                        'reserva': response_serializer.data
-                    },
-                    status=status.HTTP_201_CREATED
-                )
-        except Exception as e:
-            return Response(
-                {'error': f'Error al crear reserva: {str(e)}'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    @action(detail=False, methods=['get'])
-    def disponibilidad(self, request):
-        """Verificar disponibilidad de canchas"""
         serializer = DisponibilidadSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
 
-        cancha = serializer.validated_data['cancha_obj']
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
         fecha = serializer.validated_data['fecha']
         hora_inicio = serializer.validated_data.get('hora_inicio')
         hora_fin = serializer.validated_data.get('hora_fin')
 
         # Obtener reservas del día
-        reservas_dia = Reserva.objects.filter(
-            cancha=cancha,
+        reservas = cancha.reservas.filter(
             fecha_inicio__date=fecha,
             estado__in=['Confirmada', 'En_Uso', 'Pendiente']
         ).order_by('fecha_inicio')
 
-        # Generar horarios disponibles
-        horarios_disponibles = self._generar_horarios_disponibles(
-            fecha, reservas_dia, hora_inicio, hora_fin
-        )
+        # Si se especifica horario, verificar disponibilidad
+        if hora_inicio and hora_fin:
+            fecha_inicio = datetime.combine(fecha, hora_inicio)
+            fecha_fin = datetime.combine(fecha, hora_fin)
+
+            conflictos = reservas.filter(
+                fecha_inicio__lt=fecha_fin,
+                fecha_fin__gt=fecha_inicio
+            )
+
+            disponible = not conflictos.exists() and cancha.estado != 'Fuera_Servicio'
+
+            return Response({
+                'disponible': disponible,
+                'conflictos': ReservaListSerializer(conflictos, many=True).data if conflictos else []
+            })
+
+        # Si no, mostrar horarios ocupados
+        horarios_ocupados = []
+        for reserva in reservas:
+            horarios_ocupados.append({
+                'inicio': reserva.fecha_inicio.strftime('%H:%M'),
+                'fin': reserva.fecha_fin.strftime('%H:%M'),
+                'codigo': reserva.codigo_reserva,
+                'tipo': reserva.tipo_reserva
+            })
 
         return Response({
-            'cancha': {
-                'id': cancha.id,
-                'nombre': cancha.nombre,
-                'numero': cancha.numero
-            },
-            'fecha': fecha.strftime('%Y-%m-%d'),
-            'reservas_existentes': [
-                {
-                    'codigo': r.codigo_reserva,
-                    'hora_inicio': r.fecha_inicio.strftime('%H:%M'),
-                    'hora_fin': r.fecha_fin.strftime('%H:%M'),
-                    'estado': r.estado
-                } for r in reservas_dia
-            ],
-            'horarios_disponibles': horarios_disponibles
+            'fecha': fecha,
+            'cancha': cancha.nombre,
+            'horarios_ocupados': horarios_ocupados,
+            'estado_cancha': cancha.estado
         })
+
+
+# ==========================================
+# VIEWSET DE PARTIDO
+# ==========================================
+
+class PartidoViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet para gestión de partidos.
+
+    Endpoints principales y acciones:
+    - POST /partidos/{id}/iniciar/ - Iniciar partido
+    - POST /partidos/{id}/agregar_punto/ - Agregar punto
+    - POST /partidos/{id}/deshacer_punto/ - Deshacer último punto
+    - GET /partidos/{id}/marcador_vivo/ - Obtener marcador en vivo
+    - GET /partidos/{id}/historial_detallado/ - Ver historial completo
+    """
+
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['modalidad', 'estado', 'tipo', 'cancha']
+    search_fields = ['jugador1_equipo1__nombre', 'jugador1_equipo2__nombre']
+    ordering_fields = ['fecha_creacion', 'fecha_inicio']
+    ordering = ['-fecha_creacion']
+
+    def get_queryset(self):
+        queryset = Partido.objects.all()
+
+        # Filtros adicionales
+        if self.request.query_params.get('en_juego'):
+            queryset = queryset.filter(estado='En Juego')
+
+        if self.request.query_params.get('jugador_id'):
+            jugador_id = self.request.query_params.get('jugador_id')
+            queryset = queryset.filter(
+                Q(jugador1_equipo1_id=jugador_id) |
+                Q(jugador2_equipo1_id=jugador_id) |
+                Q(jugador1_equipo2_id=jugador_id) |
+                Q(jugador2_equipo2_id=jugador_id)
+            )
+
+        return queryset.select_related(
+            'cancha',
+            'jugador1_equipo1', 'jugador2_equipo1',
+            'jugador1_equipo2', 'jugador2_equipo2'
+        )
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return PartidoListSerializer
+        elif self.action == 'create':
+            return PartidoCreateSerializer
+        elif self.action == 'iniciar':
+            return IniciarPartidoSerializer
+        elif self.action == 'agregar_punto':
+            return AddPointSerializer
+        return PartidoSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve', 'marcador_vivo', 'historial_detallado']:
+            return [AllowAny()]
+        elif self.action in ['agregar_punto', 'deshacer_punto']:
+            return [IsAuthenticated(), IsPlayerInMatch()]
+        return [IsAuthenticated()]
+
+    @action(detail=True, methods=['post'])
+    def iniciar(self, request, pk=None):
+        """Inicia un partido"""
+        partido = self.get_object()
+        serializer = IniciarPartidoSerializer(
+            data=request.data,
+            context={'partido': partido}
+        )
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            service = PadelScoringService(partido.id)
+            service.start_match()
+
+            # Actualizar estado de cancha si es necesario
+            if partido.cancha and partido.cancha.estado == 'Disponible':
+                partido.cancha.estado = 'Ocupada'
+                partido.cancha.save()
+
+            return Response({
+                "detail": "Partido iniciado exitosamente",
+                "estado": partido.estado,
+                "marcador": service.get_live_score()
+            })
+
+        except Exception as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=True, methods=['post'])
+    def agregar_punto(self, request, pk=None):
+        """Agrega un punto al partido - solo jugadores del partido"""
+        partido = self.get_object()
+
+        # 1. VALIDACIONES DE ESTADO
+        if partido.estado != 'En Juego':
+            return Response(
+                {"detail": f"No se pueden agregar puntos. El partido está '{partido.estado}'"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # 2. LOGGING PARA DEBUG (temporal)
+        print(f"=== AGREGANDO PUNTO ===")
+        print(f"Usuario: {request.user.username}")
+        print(f"Partido: {partido.id}")
+        print(f"Data: {request.data}")
+
+        serializer = AddPointSerializer(data=request.data)
+
+        if not serializer.is_valid():
+            print(f"Errores de serializer: {serializer.errors}")
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        # 3. VALIDACIÓN DEL EQUIPO
+        equipo_ganador = serializer.validated_data['equipo_ganador']
+        if equipo_ganador not in [1, 2]:
+            return Response(
+                {"detail": "equipo_ganador debe ser 1 o 2"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        try:
+            service = PadelScoringService(partido.id)
+            punto, resultado = service.add_point(
+                equipo_ganador=equipo_ganador,
+                descripcion=serializer.validated_data.get('descripcion', '')
+            )
+
+            # Obtener marcador actualizado
+            marcador = service.get_live_score()
+
+            print(f"Punto agregado exitosamente. Nuevo marcador: {marcador}")
+
+            response_data = {
+                "detail": "Punto agregado correctamente",
+                "resultado": resultado,
+                "marcador_actual": marcador,
+                "punto_id": str(punto.id) if hasattr(punto, 'id') else None
+            }
+
+            # Si el partido terminó, actualizar cancha
+            if resultado.get('partido_finalizado') and partido.cancha:
+                partido.cancha.estado = 'Disponible'
+                partido.cancha.save()
+                print(f"Cancha {partido.cancha.id} liberada - partido finalizado")
+
+                # Actualizar reserva si existe
+                if hasattr(partido, 'reserva') and partido.reserva:
+                    partido.reserva.estado = 'Completada'
+                    partido.reserva.save()
+                    print(f"Reserva {partido.reserva.id} marcada como completada")
+
+            return Response(response_data)
+
+        except Exception as e:
+            print(f"ERROR agregando punto: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
+            return Response(
+                {"detail": f"Error interno: {str(e)}"},
+                status=status.HTTP_500_INTERNAL_SERVER_ERROR
+            )
+
+
+    @action(detail=True, methods=['post'])
+    def deshacer_punto(self, request, pk=None):
+        """Deshace el último punto"""
+        partido = self.get_object()
+
+        try:
+            service = PadelScoringService(partido.id)
+            service.undo_last_point()
+
+            return Response({
+                "detail": "Punto deshecho correctamente",
+                "marcador_actual": service.get_live_score()
+            })
+
+        except Exception as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+    @action(detail=True, methods=['get'])
+    def marcador_vivo(self, request, pk=None):
+        """Obtiene el marcador en vivo"""
+        partido = self.get_object()
+        service = PadelScoringService(partido.id)
+        marcador = service.get_live_score()
+
+        return Response(marcador)
+
+    @action(detail=True, methods=['get'])
+    def historial_detallado(self, request, pk=None):
+        """Obtiene el historial detallado del partido"""
+        partido = self.get_object()
+        service = PadelScoringService(partido.id)
+        historial = service.get_detailed_score_history()
+
+        return Response({
+            'partido': PartidoSerializer(partido).data,
+            'historial': historial
+        })
+
+    @action(detail=True, methods=['get'])
+    def estadisticas(self, request, pk=None):
+        """Obtiene estadísticas del partido"""
+        partido = self.get_object()
+        estadisticas = PadelScoringService.get_match_statistics(str(partido.id))
+
+        return Response(estadisticas)
+
+    @action(detail=True, methods=['post'])
+    def finalizar(self, request, pk=None):
+        partido = self.get_object()
+        if partido.estado == "Finalizado":
+            return Response({"detail": "El partido ya está finalizado"}, status=status.HTTP_400_BAD_REQUEST)
+        partido.estado = "Finalizado"
+        partido.save()
+        crear_historial_y_actualizar_estadisticas(partido)
+        return Response({"detail": "Partido finalizado y estadísticas actualizadas"})
+
+
+# ==========================================
+# VIEWSET DE SET
+# ==========================================
+
+class SetViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet de solo lectura para sets"""
+    queryset = Set.objects.all()
+    serializer_class = SetSerializer
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['partido', 'finalizado', 'equipo_ganador']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtrar por partido si se especifica
+        partido_id = self.request.query_params.get('partido')
+        if partido_id:
+            queryset = queryset.filter(partido_id=partido_id)
+
+        return queryset.order_by('numero_set')
+
+
+# ==========================================
+# VIEWSET DE JUEGO
+# ==========================================
+
+class JuegoViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet de solo lectura para juegos"""
+    queryset = Juego.objects.all()
+    serializer_class = JuegoSerializer
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend]
+    filterset_fields = ['set', 'finalizado', 'equipo_ganador', 'equipo_que_saca']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtrar por set si se especifica
+        set_id = self.request.query_params.get('set')
+        if set_id:
+            queryset = queryset.filter(set_id=set_id)
+
+        return queryset.order_by('numero_juego')
+
+
+# ==========================================
+# VIEWSET DE PUNTO
+# ==========================================
+
+class PuntoViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet de solo lectura para puntos"""
+    queryset = Punto.objects.all()
+    serializer_class = PuntoSerializer
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['juego', 'equipo_ganador', 'tipo_punto']
+    ordering_fields = ['numero_punto', 'timestamp']
+    ordering = ['numero_punto']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtrar por juego si se especifica
+        juego_id = self.request.query_params.get('juego')
+        if juego_id:
+            queryset = queryset.filter(juego_id=juego_id)
+
+        # Filtrar por partido
+        partido_id = self.request.query_params.get('partido')
+        if partido_id:
+            queryset = queryset.filter(juego__set__partido_id=partido_id)
+
+        return queryset
+
+
+# ==========================================
+# VIEWSET DE HISTORIAL JUGADOR
+# ==========================================
+
+class HistorialJugadorViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet de solo lectura para historial de jugadores"""
+    queryset = HistorialJugador.objects.all()
+    serializer_class = HistorialJugadorSerializer
+    permission_classes = [AllowAny]
+    filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
+    filterset_fields = ['jugador', 'partido', 'es_ganador', 'equipo_jugador']
+    ordering_fields = ['fecha_partido']
+    ordering = ['-fecha_partido']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Filtrar por jugador
+        jugador_id = self.request.query_params.get('jugador')
+        if jugador_id:
+            queryset = queryset.filter(jugador_id=jugador_id)
+
+        # Solo victorias
+        if self.request.query_params.get('solo_victorias'):
+            queryset = queryset.filter(es_ganador=True)
+
+        # Solo partidos finalizados
+        queryset = queryset.filter(partido__estado='Finalizado')
+
+        return queryset.select_related('jugador', 'partido', 'Pareja')
+
+
+
+class EstadisticasJugadorViewSet(viewsets.ReadOnlyModelViewSet):
+    """ViewSet de solo lectura para estadísticas de jugadores"""
+    queryset = EstadisticasJugador.objects.all()
+    serializer_class = EstadisticasJugadorSerializer
+    permission_classes = [AllowAny]
+    filter_backends = [filters.OrderingFilter]
+    ordering_fields = ['partidos_ganados', 'racha_actual_victorias']
+    ordering = ['-partidos_ganados']
+
+    def get_queryset(self):
+        queryset = super().get_queryset()
+
+        # Top ganadores
+        if self.request.query_params.get('top'):
+            limite = int(self.request.query_params.get('top', 10))
+            queryset = queryset[:limite]
+
+        return queryset.select_related('jugador')
+
+    @action(detail=False, methods=['get'])
+    def ranking(self, request):
+        """Obtiene el ranking de jugadores (mínimo 5 partidos)"""
+        estadisticas = self.get_queryset().filter(
+            partidos_jugados__gte=5
+        ).order_by('-porcentaje_victorias')[:20]
+
+        ranking_data = []
+        for idx, stat in enumerate(estadisticas, 1):
+            ranking_data.append({
+                'posicion': idx,
+                'jugador': stat.jugador.nombre_completo,
+                'partidos_jugados': stat.partidos_jugados,
+                'partidos_ganados': stat.partidos_ganados,
+                'porcentaje_victorias': stat.porcentaje_victorias,
+                'racha_actual': stat.racha_actual_victorias
+            })
+
+        return Response(ranking_data)
+
+    @action(detail=True, methods=['get'])
+    def detalle(self, request, pk=None):
+        """Detalle completo de un jugador (estadísticas + últimos partidos)"""
+        estadistica = self.get_object()
+        serializer = self.get_serializer(estadistica)
+        return Response(serializer.data)
+
+
+class ReservaViewSet(viewsets.ModelViewSet):
+    """
+    ViewSet para gestión de reservas.
+
+    Acciones especiales:
+    - POST /reservas/{id}/confirmar/ - Confirmar reserva
+    - POST /reservas/{id}/cancelar/ - Cancelar reserva
+    - POST /reservas/{id}/cambiar_estado/ - Cambiar estado
+    - POST /reservas/{id}/crear_partido/ - Crear partido desde reserva
+    - GET /reservas/calendario/ - Ver calendario de reservas
+    """
+
+    filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
+    filterset_fields = ['cancha', 'estado', 'tipo_reserva', 'pagado']
+    search_fields = ['codigo_reserva', 'jugador__nombre', 'observaciones']
+    ordering_fields = ['fecha_inicio', 'fecha_creacion']
+    ordering = ['fecha_inicio']
+
+    def get_queryset(self):
+        queryset = Reserva.objects.all()
+
+        # Filtros adicionales
+        if self.request.query_params.get('proximas'):
+            queryset = queryset.filter(
+                fecha_inicio__gt=timezone.now(),
+                estado__in=['Confirmada', 'Pendiente']
+            )
+
+        if self.request.query_params.get('hoy'):
+            hoy = timezone.now().date()
+            queryset = queryset.filter(fecha_inicio__date=hoy)
+
+        if self.request.query_params.get('jugador_id'):
+            jugador_id = self.request.query_params.get('jugador_id')
+            queryset = queryset.filter(jugador_id=jugador_id)
+
+        return queryset.select_related('cancha', 'jugador', 'partido')
+
+    def get_serializer_class(self):
+        if self.action == 'list':
+            return ReservaListSerializer
+        elif self.action == 'create':
+            return ReservaCreateSerializer
+        elif self.action == 'cambiar_estado':
+            return CambiarEstadoReservaSerializer
+        elif self.action == 'crear_partido':
+            return CrearPartidoDesdeReservaSerializer
+        return ReservaSerializer
+
+    def get_permissions(self):
+        if self.action in ['list', 'retrieve', 'calendario']:
+            return [AllowAny()]
+        return [IsAuthenticated()]
+
+    def perform_create(self, serializer):
+        """Al crear, calcular precio total"""
+        with transaction.atomic():
+            reserva = serializer.save()
+
+            # Calcular precio total
+            horas = reserva.duracion_minutos / 60
+            reserva.precio_total = reserva.precio_hora * horas
+            reserva.save()
+
+            # Si la reserva es inmediata, cambiar estado de cancha
+            if reserva.fecha_inicio <= timezone.now() + timedelta(minutes=30):
+                if reserva.cancha.estado == 'Disponible':
+                    reserva.cancha.estado = 'Ocupada'
+                    reserva.cancha.save()
+
+    @action(detail=True, methods=['post'])
+    def confirmar(self, request, pk=None):
+        """Confirma una reserva pendiente"""
+        reserva = self.get_object()
+
+        if reserva.estado != 'Pendiente':
+            return Response(
+                {"detail": "Solo se pueden confirmar reservas pendientes"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        reserva.estado = 'Confirmada'
+        reserva.pagado = True
+        reserva.save()
+
+        return Response({
+            "detail": "Reserva confirmada exitosamente",
+            "codigo": reserva.codigo_reserva
+        })
+
+    @action(detail=True, methods=['post'])
+    def cancelar(self, request, pk=None):
+        """Cancela una reserva"""
+        reserva = self.get_object()
+
+        if reserva.estado in ['Cancelada', 'Completada']:
+            return Response(
+                {"detail": f"No se puede cancelar una reserva {reserva.get_estado_display()}"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Validar tiempo mínimo para cancelación (2 horas antes)
+        tiempo_limite = reserva.fecha_inicio - timedelta(hours=2)
+        if timezone.now() > tiempo_limite:
+            return Response(
+                {"detail": "No se puede cancelar con menos de 2 horas de anticipación"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        with transaction.atomic():
+            reserva.estado = 'Cancelada'
+            reserva.save()
+
+            # Liberar cancha si estaba ocupada
+            if reserva.cancha.estado == 'Ocupada':
+                # Verificar que no haya otros partidos activos
+                otros_activos = reserva.cancha.partidos.filter(
+                    estado='En Juego'
+                ).exists()
+
+                if not otros_activos:
+                    reserva.cancha.estado = 'Disponible'
+                    reserva.cancha.save()
+
+        return Response({
+            "detail": "Reserva cancelada exitosamente"
+        })
+
+    @action(detail=True, methods=['post'])
+    def cambiar_estado(self, request, pk=None):
+        """Cambia el estado de una reserva"""
+        reserva = self.get_object()
+        serializer = CambiarEstadoReservaSerializer(
+            data=request.data,
+            context={'reserva': reserva}
+        )
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        nuevo_estado = serializer.validated_data['estado']
+        motivo = serializer.validated_data.get('motivo', '')
+
+        with transaction.atomic():
+            estado_anterior = reserva.estado
+            reserva.estado = nuevo_estado
+
+            if motivo:
+                reserva.observaciones = f"{reserva.observaciones}\n[{timezone.now():%d/%m/%Y %H:%M}] " \
+                                        f"Cambio de estado: {estado_anterior} → {nuevo_estado}. " \
+                                        f"Motivo: {motivo}".strip()
+
+            reserva.save()
+
+            # Lógica adicional según el nuevo estado
+            if nuevo_estado == 'En_Uso' and reserva.cancha.estado == 'Disponible':
+                reserva.cancha.estado = 'Ocupada'
+                reserva.cancha.save()
+            elif nuevo_estado in ['Completada', 'Cancelada', 'No_Show']:
+                if reserva.cancha.estado == 'Ocupada':
+                    # Verificar si hay otros usos activos
+                    otros_activos = Reserva.objects.filter(
+                        cancha=reserva.cancha,
+                        estado='En_Uso'
+                    ).exclude(id=reserva.id).exists()
+
+                    if not otros_activos:
+                        reserva.cancha.estado = 'Disponible'
+                        reserva.cancha.save()
+
+        return Response({
+            "detail": f"Estado cambiado a {reserva.get_estado_display()}",
+            "estado_anterior": estado_anterior,
+            "estado_nuevo": nuevo_estado
+        })
+
+    @action(detail=True, methods=['post'])
+    def crear_partido(self, request, pk=None):
+        """Crea un partido desde una reserva"""
+        reserva = self.get_object()
+
+        # Validaciones
+        if reserva.partido:
+            return Response(
+                {"detail": "Esta reserva ya tiene un partido asociado"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if reserva.estado not in ['Confirmada', 'En_Uso']:
+            return Response(
+                {"detail": "Solo se pueden crear partidos de reservas confirmadas o en uso"},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        serializer = CrearPartidoDesdeReservaSerializer(
+            data=request.data,
+            context={'reserva': reserva}
+        )
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            with transaction.atomic():
+                # Obtener jugadores
+                jugadores = [reserva.jugador]
+                if serializer.validated_data.get('jugadores_adicionales'):
+                    jugadores_adicionales = Jugador.objects.filter(
+                        id__in=serializer.validated_data['jugadores_adicionales']
+                    )
+                    jugadores.extend(list(jugadores_adicionales))
+
+                # Determinar modalidad
+                modalidad = serializer.validated_data.get('modalidad')
+                if not modalidad:
+                    modalidad = 'Individual' if len(jugadores) == 2 else 'Dobles'
+
+                # Crear partido
+                partido_data = {
+                    'modalidad': modalidad,
+                    'tipo': 'Amistoso',
+                    'cancha': reserva.cancha,
+                    'estado': 'Pendiente',
+                    'jugador1_equipo1': jugadores[0],
+                    'jugador1_equipo2': jugadores[1] if len(jugadores) > 1 else None,
+                }
+
+                if modalidad == 'Dobles' and len(jugadores) >= 4:
+                    partido_data.update({
+                        'jugador2_equipo1': jugadores[2],
+                        'jugador2_equipo2': jugadores[3]
+                    })
+
+                partido = Partido.objects.create(**partido_data)
+
+                # Asociar con reserva
+                reserva.partido = partido
+                reserva.save()
+
+                # Cambiar estado si es necesario
+                if reserva.estado == 'En_Uso':
+                    partido.estado = 'En Juego'
+                    partido.fecha_inicio = timezone.now()
+                    partido.save()
+
+                    # Crear estructura inicial
+                    service = PadelScoringService(partido.id)
+                    service.start_match()
+
+                return Response({
+                    "detail": "Partido creado exitosamente",
+                    "partido_id": str(partido.id),
+                    "partido": PartidoSerializer(partido).data
+                })
+
+        except Exception as e:
+            return Response(
+                {"detail": str(e)},
+                status=status.HTTP_400_BAD_REQUEST
+            )
 
     @action(detail=False, methods=['get'])
     def calendario(self, request):
-        """Obtener calendario de reservas"""
+        """Vista de calendario de reservas"""
         serializer = CalendarioReservasSerializer(data=request.query_params)
-        serializer.is_valid(raise_exception=True)
+
+        if not serializer.is_valid():
+            return Response(serializer.errors, status=status.HTTP_400_BAD_REQUEST)
 
         fecha_inicio = serializer.validated_data['fecha_inicio']
         fecha_fin = serializer.validated_data['fecha_fin']
         cancha_id = serializer.validated_data.get('cancha')
 
-        # Filtros
-        reservas_query = Reserva.objects.filter(
+        # Obtener reservas en el rango
+        reservas = self.get_queryset().filter(
             fecha_inicio__date__gte=fecha_inicio,
-            fecha_inicio__date__lte=fecha_fin,
-            estado__in=['Confirmada', 'En_Uso', 'Pendiente']
+            fecha_inicio__date__lte=fecha_fin
+        ).exclude(
+            estado='Cancelada'
         )
 
         if cancha_id:
-            reservas_query = reservas_query.filter(cancha_id=cancha_id)
+            reservas = reservas.filter(cancha_id=cancha_id)
 
-        reservas = reservas_query.select_related('cancha').order_by('fecha_inicio')
-
-        # Organizar por días
-        calendario = defaultdict(list)
+        # Agrupar por día
+        calendario = {}
         for reserva in reservas:
-            fecha_str = reserva.fecha_inicio.date().strftime('%Y-%m-%d')
+            fecha_str = reserva.fecha_inicio.date().isoformat()
+            if fecha_str not in calendario:
+                calendario[fecha_str] = []
+
             calendario[fecha_str].append({
-                'id': reserva.id,
+                'id': str(reserva.id),
                 'codigo': reserva.codigo_reserva,
                 'hora_inicio': reserva.fecha_inicio.strftime('%H:%M'),
                 'hora_fin': reserva.fecha_fin.strftime('%H:%M'),
-                'cancha': {
-                    'id': reserva.cancha.id,
-                    'nombre': reserva.cancha.nombre,
-                    'numero': reserva.cancha.numero
-                },
-                # 'cliente': reserva.cliente.nombre_completo,  # COMENTADO - requiere Cliente
-                'tipo_reserva': reserva.tipo_reserva,
+                'cancha': reserva.cancha.nombre,
+                'tipo': reserva.tipo_reserva,
                 'estado': reserva.estado,
-                'precio_total': float(reserva.precio_total),
-                'numero_jugadores': reserva.numero_jugadores
+                'jugador': reserva.jugador.nombre_completo if reserva.jugador else None
             })
 
+        # Ordenar por hora en cada día
+        for fecha in calendario:
+            calendario[fecha].sort(key=lambda x: x['hora_inicio'])
+
         return Response({
-            'fecha_inicio': fecha_inicio.strftime('%Y-%m-%d'),
-            'fecha_fin': fecha_fin.strftime('%Y-%m-%d'),
+            'fecha_inicio': fecha_inicio,
+            'fecha_fin': fecha_fin,
             'total_reservas': reservas.count(),
-            'calendario': dict(calendario)
+            'calendario': calendario
         })
-
-    @action(detail=True, methods=['post'])
-    def confirmar(self, request, pk=None):
-        """Confirmar una reserva pendiente"""
-        reserva = self.get_object()
-
-        if reserva.estado != 'Pendiente':
-            return Response(
-                {'error': 'Solo se pueden confirmar reservas pendientes'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-        reserva.confirmar()
-        return Response({
-            'message': f'Reserva {reserva.codigo_reserva} confirmada exitosamente',
-            'reserva': ReservaSerializer(reserva).data
-        })
-
-    @action(detail=True, methods=['post'])
-    def cancelar(self, request, pk=None):
-        """Cancelar una reserva"""
-        reserva = self.get_object()
-        motivo = request.data.get('motivo', '')
-
-        if reserva.cancelar(motivo):
-            return Response({
-                'message': f'Reserva {reserva.codigo_reserva} cancelada exitosamente',
-                'reserva': ReservaSerializer(reserva).data
-            })
-        else:
-            return Response(
-                {'error': 'No se puede cancelar esta reserva (tiempo límite excedido o estado no válido)'},
-                status=status.HTTP_400_BAD_REQUEST
-            )
-
-    @action(detail=False, methods=['get'])
-    def estadisticas(self, request):
-        """Estadísticas generales de reservas"""
-        # Filtros de fecha
-        fecha_desde = request.query_params.get('fecha_desde')
-        fecha_hasta = request.query_params.get('fecha_hasta')
-
-        reservas_query = Reserva.objects.all()
-
-        if fecha_desde:
-            fecha_desde = datetime.strptime(fecha_desde, '%Y-%m-%d').date()
-            reservas_query = reservas_query.filter(fecha_inicio__date__gte=fecha_desde)
-
-        if fecha_hasta:
-            fecha_hasta = datetime.strptime(fecha_hasta, '%Y-%m-%d').date()
-            reservas_query = reservas_query.filter(fecha_inicio__date__lte=fecha_hasta)
-
-        # Estadísticas básicas
-        total_reservas = reservas_query.count()
-        reservas_confirmadas = reservas_query.filter(estado='Confirmada').count()
-        reservas_completadas = reservas_query.filter(estado='Completada').count()
-        reservas_canceladas = reservas_query.filter(estado='Cancelada').count()
-
-        # Ingresos
-        ingresos_totales = reservas_query.filter(pagado=True).aggregate(
-            total=Sum('precio_total'))['total'] or 0
-
-        # Estadísticas por cancha
-        stats_canchas = reservas_query.values('cancha__nombre').annotate(
-            total_reservas=Count('id'),
-            ingresos=Sum('precio_total', filter=Q(pagado=True))
-        ).order_by('-total_reservas')
-
-        # Estadísticas por tipo de reserva
-        stats_tipos = reservas_query.values('tipo_reserva').annotate(
-            total=Count('id')
-        ).order_by('-total')
-
-        return Response({
-            'resumen': {
-                'total_reservas': total_reservas,
-                'confirmadas': reservas_confirmadas,
-                'completadas': reservas_completadas,
-                'canceladas': reservas_canceladas,
-                'tasa_confirmacion': round((reservas_confirmadas / total_reservas * 100),
-                                           2) if total_reservas > 0 else 0,
-                'ingresos_totales': float(ingresos_totales)
-            },
-            'por_cancha': list(stats_canchas),
-            'por_tipo': list(stats_tipos)
-        })
-
-    def _generar_horarios_disponibles(self, fecha, reservas_existentes, hora_inicio=None, hora_fin=None):
-        """Generar lista de horarios disponibles"""
-        # Horarios de funcionamiento (6:00 AM a 11:00 PM)
-        hora_apertura = time(6, 0)
-        hora_cierre = time(23, 0)
-
-        if hora_inicio:
-            hora_apertura = max(hora_apertura, hora_inicio)
-        if hora_fin:
-            hora_cierre = min(hora_cierre, hora_fin)
-
-        # Generar slots de 1 hora
-        horarios_disponibles = []
-        hora_actual = datetime.combine(fecha, hora_apertura)
-        hora_limite = datetime.combine(fecha, hora_cierre)
-
-        while hora_actual < hora_limite:
-            hora_siguiente = hora_actual + timedelta(hours=1)
-
-            # Verificar si está ocupado
-            ocupado = any(
-                reserva.fecha_inicio < hora_siguiente and reserva.fecha_fin > hora_actual
-                for reserva in reservas_existentes
-            )
-
-            if not ocupado:
-                horarios_disponibles.append({
-                    'hora_inicio': hora_actual.strftime('%H:%M'),
-                    'hora_fin': hora_siguiente.strftime('%H:%M'),
-                    'disponible': True
-                })
-
-            hora_actual = hora_siguiente
-
-        return horarios_disponibles
-
-
-# ==========================================
-# VIEWSETS EXISTENTES (MANTENER IGUAL)
-# ==========================================
-class SetViewSet(viewsets.ModelViewSet):
-    queryset = Set.objects.all()
-    serializer_class = SetSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['partido', 'finalizado', 'equipo_ganador']
-
-
-class JuegoViewSet(viewsets.ModelViewSet):
-    queryset = Juego.objects.all()
-    serializer_class = JuegoSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['set', 'finalizado', 'equipo_ganador', 'equipo_que_saca']
-
-
-class PuntoViewSet(viewsets.ModelViewSet):
-    queryset = Punto.objects.all()
-    serializer_class = PuntoSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['juego', 'equipo_ganador', 'tipo_punto']
-
-
-class HistorialJugadorViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = HistorialJugador.objects.all()
-    serializer_class = HistorialJugadorSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['jugador', 'partido', 'es_ganador', 'equipo_jugador']
-
-
-class EstadisticasJugadorViewSet(viewsets.ReadOnlyModelViewSet):
-    queryset = EstadisticasJugador.objects.all()
-    serializer_class = EstadisticasJugadorSerializer
-    filter_backends = [DjangoFilterBackend]
-    filterset_fields = ['jugador']
-
-
-# ==========================================
-# VIEWS DE API
-# ==========================================
-@api_view(['GET'])
-def api_root(request):
-    """Vista raíz de la API - Información para desarrolladores frontend"""
-    if request.accepts('text/html'):
-        # Si se accede desde navegador, mostrar información básica
-        return JsonResponse({
-            'message': '🏓 Pádel Score API',
-            'version': 'v1.0',
-            'description': 'Backend API para sistema de puntuación de pádel',
-            'endpoints': {
-                'admin': '/admin/',
-                'api_players': '/api/v1/players/',
-                'api_scoring': '/api/v1/scoring/',
-                'docs': 'Documentación pendiente'
-            },
-            'status': 'operational',
-            'frontend': 'To be developed separately'
-        }, json_dumps_params={'indent': 2})
-
-    # Para requests de API, devolver estructura JSON limpia
-    return JsonResponse({
-        'api_name': 'Pádel Score API',
-        'version': 'v1.0',
-        'endpoints': [
-            '/api/v1/players/',
-            '/api/v1/scoring/'
-        ]
-    })

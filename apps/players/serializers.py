@@ -18,7 +18,7 @@ class JugadorSerializer(serializers.ModelSerializer):
         model = Jugador
         fields = [
             'id', 'nombre', 'apellido', 'nombre_completo', 'email', 'email_efectivo',
-            'edad', 'sexo', 'telefono', 'nivel_habilidad', 'es_invitado',
+            'edad', 'sexo', 'telefono',
             'activo', 'fecha_creacion', 'username', 'es_registrado',
             'partidos_jugados', 'partidos_ganados'
         ]
@@ -45,7 +45,7 @@ class JugadorListSerializer(serializers.ModelSerializer):
         model = Jugador
         fields = [
             'id', 'nombre_completo', 'email_efectivo', 'edad', 'sexo',
-            'nivel_habilidad', 'activo', 'username', 'tipo_jugador'
+            'activo', 'username', 'tipo_jugador'
         ]
 
     def get_tipo_jugador(self, obj):
@@ -70,7 +70,7 @@ class JugadorCreateSerializer(serializers.ModelSerializer):
         model = Jugador
         fields = [
             'nombre', 'apellido', 'email', 'edad', 'sexo', 'telefono',
-            'nivel_habilidad', 'password', 'tipo_jugador'
+            'password', 'tipo_jugador'
         ]
 
     def validate_email(self, value):
@@ -200,7 +200,7 @@ class JugadorUpdateSerializer(serializers.ModelSerializer):
         model = Jugador
         fields = [
             'nombre', 'apellido', 'email', 'edad', 'sexo', 'telefono',
-            'nivel_habilidad', 'activo'
+            'activo'
         ]
 
     def validate_email(self, value):

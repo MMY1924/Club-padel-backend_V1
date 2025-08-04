@@ -13,6 +13,7 @@ urlpatterns = [
     path('admin/', admin.site.urls),
     path('api/v1/players/', include('apps.players.urls')),
     path('api/v1/scoring/', include('apps.scoring.urls')),
+    path('api/v1/tournaments/', include('apps.tournaments.urls')),
 ]
 
 if settings.DEBUG:

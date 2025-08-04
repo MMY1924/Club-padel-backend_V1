@@ -20,6 +20,8 @@ router.register(r'historial', HistorialJugadorViewSet, basename='historial')
 router.register(r'estadisticas', EstadisticasJugadorViewSet, basename='estadisticas')
 router.register(r'reservas', ReservaViewSet, basename='reserva')
 
+app_name = 'scoring'
+
 urlpatterns = [
     # Vista raíz de la API
     path('', api_root, name='scoring-api-root'),

@@ -26,6 +26,9 @@ requests = "2.32.4"
 django-extensions = "^3.2.0"    
 pydotplus = "^2.0.2"       
 pyparsing = "^3.0.9" 
+pytest = "^7.4"
+pytest-django = "^4.8"
+
 
 [tool.poetry.group.dev.dependencies]
 pytest = "^7.4.0"

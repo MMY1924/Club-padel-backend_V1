@@ -6,6 +6,12 @@ from django_filters.rest_framework import DjangoFilterBackend
 from rest_framework.filters import SearchFilter, OrderingFilter
 from django.db.models import Q, Count, Avg
 from django.db import transaction
+from rest_framework.permissions import IsAuthenticated, AllowAny
+from rest_framework.authtoken.models import Token
+from django.contrib.auth import authenticate
+from django.contrib.auth.models import User
+
+# Luego agregar las 4 acciones del artifact "auth-actions-to-add" a tu JugadorViewSet
 
 from .models import Jugador
 from .serializers import (
@@ -34,7 +40,7 @@ class JugadorViewSet(viewsets.ModelViewSet):
         return JugadorSerializer
 
     def create(self, request, *args, **kwargs):
-        """Crear jugador con validaciones"""
+        """Crear jugador con auto-login para registrados"""
         serializer = self.get_serializer(data=request.data)
         serializer.is_valid(raise_exception=True)
 
@@ -42,19 +48,23 @@ class JugadorViewSet(viewsets.ModelViewSet):
             with transaction.atomic():
                 jugador = serializer.save()
 
-                tipo = 'registrado' if not jugador.es_invitado else 'invitado'
-                mensaje = f'Jugador {tipo} {jugador.nombre_completo} creado exitosamente'
+                response_data = {
+                    'jugador': JugadorSerializer(jugador).data
+                }
 
-                if not jugador.es_invitado:
-                    mensaje += f' (Username: {jugador.user.username})'
+                # Si es jugador registrado (tiene user), crear token para auto-login
+                if jugador.user:
+                    token, created = Token.objects.get_or_create(user=jugador.user)
+                    response_data.update({
+                        'token': token.key,
+                        'message': f'Jugador registrado exitosamente: {jugador.nombre_completo}',
+                        'auto_login': True
+                    })
+                else:
+                    response_data['message'] = f'Jugador invitado creado: {jugador.nombre_completo}'
 
-                return Response(
-                    {
-                        'message': mensaje,
-                        'jugador': JugadorSerializer(jugador).data
-                    },
-                    status=status.HTTP_201_CREATED
-                )
+                return Response(response_data, status=status.HTTP_201_CREATED)
+
         except Exception as e:
             return Response(
                 {'error': f'Error al crear jugador: {str(e)}'},
@@ -380,3 +390,84 @@ class JugadorViewSet(viewsets.ModelViewSet):
                 'Solo los jugadores registrados pueden hacer reservas de canchas'
             ]
         })
+
+    def get_permissions(self):
+        """Permisos según la acción"""
+        if self.action in ['login', 'create']:
+            permission_classes = [AllowAny]
+        elif self.action in ['me', 'logout']:
+            permission_classes = [IsAuthenticated]
+        else:
+            permission_classes = [IsAuthenticated]
+
+        return [permission() for permission in permission_classes]
+
+    @action(detail=False, methods=['post'], permission_classes=[AllowAny])
+    def login(self, request):
+        """Login usando email o username, devuelve token y datos del jugador"""
+        email_or_username = request.data.get('email') or request.data.get('username')
+        password = request.data.get('password')
+
+        if not email_or_username or not password:
+            return Response(
+                {'error': 'Debe proporcionar email/username y contraseña'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        # Buscar usuario por email o username
+        user = User.objects.filter(
+            Q(email__iexact=email_or_username) | Q(username=email_or_username)
+        ).first()
+
+        if not user:
+            return Response({'error': 'Usuario no encontrado'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Autenticación
+        user = authenticate(username=user.username, password=password)
+        if not user:
+            return Response({'error': 'Credenciales inválidas'}, status=status.HTTP_401_UNAUTHORIZED)
+
+        # Obtener jugador asociado
+        try:
+            jugador = user.jugador
+        except Jugador.DoesNotExist:
+            return Response({'error': 'No hay jugador asociado a este usuario'}, status=status.HTTP_404_NOT_FOUND)
+
+        # Crear o recuperar token
+        token, _ = Token.objects.get_or_create(user=user)
+
+        return Response({
+            'token': token.key,
+            'jugador': {
+                'id': str(jugador.id),
+                'username': user.username,
+                'nombre': jugador.nombre,
+                'apellido': jugador.apellido,
+                'email': jugador.email,
+                'tipo': 'Registrado' if jugador.es_registrado else 'Invitado'
+            },
+            'message': 'Login exitoso'
+        })
+
+    @action(detail=False, methods=['get'], permission_classes=[IsAuthenticated])
+    def me(self, request):
+        """Obtener información del jugador actual"""
+        try:
+            jugador = Jugador.objects.get(user=request.user)
+            serializer = JugadorSerializer(jugador)
+            return Response(serializer.data)
+        except Jugador.DoesNotExist:
+            return Response(
+                {'error': 'Jugador no encontrado'},
+                status=status.HTTP_404_NOT_FOUND
+            )
+
+    @action(detail=False, methods=['post'], permission_classes=[IsAuthenticated])
+    def logout(self, request):
+        """Logout"""
+        try:
+            token = Token.objects.get(user=request.user)
+            token.delete()
+            return Response({'message': 'Logout exitoso'})
+        except Token.DoesNotExist:
+            return Response({'message': 'Token no encontrado'})

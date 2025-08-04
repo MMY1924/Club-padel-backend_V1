@@ -311,10 +311,25 @@ class PuntoSerializer(serializers.ModelSerializer):
         fields = '__all__'
         read_only_fields = ['id', 'timestamp', 'numero_punto']
 
+class PartidoSimpleSerializer(serializers.ModelSerializer):
+    equipo1_display = serializers.SerializerMethodField()
+    equipo2_display = serializers.SerializerMethodField()
+    cancha_nombre = serializers.CharField(source='cancha.nombre', read_only=True)
+
+    class Meta:
+        model = Partido
+        fields = ['id', 'modalidad', 'tipo', 'estado', 'cancha_nombre', 'fecha_inicio', 'fecha_fin', 'equipo1_display', 'equipo2_display']
+
+    def get_equipo1_display(self, obj):
+        return obj.equipo1_nombre
+
+    def get_equipo2_display(self, obj):
+        return obj.equipo2_nombre
+
 
 class HistorialJugadorSerializer(serializers.ModelSerializer):
     jugador_info = serializers.SerializerMethodField()
-    partido_info = serializers.SerializerMethodField()
+    partido = serializers.SerializerMethodField()
     oponentes = serializers.SerializerMethodField()
     compañero_info = serializers.SerializerMethodField()
 
@@ -328,14 +343,6 @@ class HistorialJugadorSerializer(serializers.ModelSerializer):
             'nombre_completo': obj.jugador.nombre_completo
         }
 
-    def get_partido_info(self, obj):
-        return {
-            'id': obj.partido.id,
-            'modalidad': obj.partido.modalidad,
-            'tipo': obj.partido.tipo,
-            'cancha': obj.partido.cancha.nombre if obj.partido.cancha else None
-        }
-
     def get_oponentes(self, obj):
         return obj.get_oponentes_display()
 
@@ -347,9 +354,10 @@ class HistorialJugadorSerializer(serializers.ModelSerializer):
             }
         return None
 
-
 class EstadisticasJugadorSerializer(serializers.ModelSerializer):
     jugador_info = serializers.SerializerMethodField()
+    ultimos_partidos = serializers.SerializerMethodField()
+    porcentaje_victorias = serializers.SerializerMethodField()  # 👈 agregado
 
     class Meta:
         model = EstadisticasJugador
@@ -363,10 +371,17 @@ class EstadisticasJugadorSerializer(serializers.ModelSerializer):
             'email': obj.jugador.email
         }
 
+    def get_ultimos_partidos(self, obj):
+        """Trae los últimos 5 partidos finalizados del jugador."""
+        ultimos = obj.jugador.historial.filter(
+            partido__estado='Finalizado'
+        ).select_related('partido').order_by('-fecha_partido')[:5]
+        return HistorialJugadorSerializer(ultimos, many=True).data
 
-# ==========================================
-# SERIALIZERS PARA RESERVAS
-# ==========================================
+    def get_porcentaje_victorias(self, obj):
+        """Expone el porcentaje de victorias calculado."""
+        return obj.porcentaje_victorias
+
 
 class ReservaSerializer(serializers.ModelSerializer):
     cancha_info = serializers.SerializerMethodField()

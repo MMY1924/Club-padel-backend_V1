@@ -15,11 +15,13 @@ INSTALLED_APPS = [
     'django.contrib.messages',
     'django.contrib.staticfiles',
     'rest_framework',
+    'rest_framework.authtoken',
     'corsheaders',
     'django_filters',
     'channels',
-    'apps.players.apps.PlayersConfig',
+    'apps.players',
     'apps.scoring',
+    'apps.tournaments'
 ]
 
 # Configuración de Channels
@@ -41,6 +43,29 @@ MIDDLEWARE = [
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
 ]
+
+# Configuración adicional para desarrollo
+if DEBUG:
+    # Logging para desarrollo
+    LOGGING = {
+        'version': 1,
+        'disable_existing_loggers': False,
+        'handlers': {
+            'console': {
+                'class': 'logging.StreamHandler',
+            },
+        },
+        'loggers': {
+            'django': {
+                'handlers': ['console'],
+                'level': 'INFO',
+            },
+            'apps': {
+                'handlers': ['console'],
+                'level': 'DEBUG',
+            },
+        },
+    }
 
 ROOT_URLCONF = 'padel_backend.urls'
 
@@ -66,7 +91,7 @@ DATABASES = {
         'NAME': config('DB_NAME', default='padel_db'),
         'USER': config('DB_USER', default='postgres'),
         'PASSWORD': config('DB_PASSWORD', default='123456789a'),
-        'HOST': config('DB_HOST', default='db'),
+        'HOST': config('DB_HOST', default='127.0.0.1'),
         'PORT': config('DB_PORT', default='5432'),
         'OPTIONS': {
             'sslmode': 'prefer',
@@ -87,17 +112,29 @@ MEDIA_ROOT = BASE_DIR / 'media'
 DEFAULT_AUTO_FIELD = 'django.db.models.BigAutoField'
 
 REST_FRAMEWORK = {
-    'DEFAULT_PERMISSION_CLASSES': [
+    'DEFAULT_AUTHENTICATION_CLASSES': [
         'rest_framework.authentication.TokenAuthentication',
+        'rest_framework.authentication.SessionAuthentication',  # Para el admin
     ],
+    'DEFAULT_PERMISSION_CLASSES': [
+        'rest_framework.permissions.AllowAny',  # Cambiado para desarrollo
+    ],
+    'DEFAULT_RENDERER_CLASSES': [
+        'rest_framework.renderers.JSONRenderer',
+    ],
+    'DEFAULT_PARSER_CLASSES': [
+        'rest_framework.parsers.JSONParser',
+        'rest_framework.parsers.FormParser',
+        'rest_framework.parsers.MultiPartParser',
+    ],
+    'DEFAULT_PAGINATION_CLASS': 'rest_framework.pagination.PageNumberPagination',
+    'PAGE_SIZE': 20
 }
 
-INSTALLED_APPS += ['rest_framework.authtoken']
-
 CORS_ALLOWED_ORIGINS = [
-    "http://localhost:3000",    # React default
-    "http://localhost:5173",    # Vite default
-    "http://localhost:8080",    # Vue CLI default
+    "http://localhost:3000",  # React default
+    "http://localhost:5173",  # Vite default
+    "http://localhost:8080",  # Vue CLI default
     "http://127.0.0.1:3000",
     "http://127.0.0.1:5173",
     "http://127.0.0.1:8080",
@@ -105,6 +142,7 @@ CORS_ALLOWED_ORIGINS = [
 
 # Para desarrollo local más permisivo
 CORS_ALLOW_CREDENTIALS = True
+ORS_ALLOW_ALL_ORIGINS = False
 
 # Headers permitidos para el frontend
 CORS_ALLOW_HEADERS = [

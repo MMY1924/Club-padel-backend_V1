@@ -1,17 +1,42 @@
-
 import uuid
 from django.db import models
 from django.contrib.auth.models import User
 from django.core.validators import MinValueValidator, MaxValueValidator
+from django.db import transaction
+
+
+def generar_username_unico(base_username):
+    """Genera un username único agregando sufijos si es necesario."""
+    username = base_username
+    contador = 1
+    while User.objects.filter(username=username).exists():
+        username = f"{base_username}_{contador}"
+        contador += 1
+    return username
+
+
+class JugadorManager(models.Manager):
+    """Consultas personalizadas"""
+    def get_queryset(self):
+        return super().get_queryset().select_related('user')
+
+    def activos(self):
+        return self.filter(activo=True)
+
+    def registrados(self):
+        return self.exclude(user__username__startswith='jugador_invitado_')
+
+    def invitados(self):
+        return self.filter(user__username__startswith='jugador_invitado_')
+
+    def disponibles_para_invitados(self):
+        return self.filter(
+            user__username__startswith='jugador_invitado_',
+            activo=True
+        ).order_by('user__username')
 
 
 class Jugador(models.Model):
-    SEXO_CHOICES = [
-        ('M', 'Masculino'),
-        ('F', 'Femenino'),
-        ('O', 'Otro'),
-    ]
-
     # UUID auto-generado
     id = models.UUIDField(
         primary_key=True,
@@ -19,7 +44,7 @@ class Jugador(models.Model):
         editable=False
     )
 
-    # ✅ USER OBLIGATORIO - Todos los jugadores deben tener usuario
+    # USER OBLIGATORIO - Todos los jugadores deben tener usuario
     user = models.OneToOneField(
         User,
         on_delete=models.CASCADE,
@@ -27,7 +52,7 @@ class Jugador(models.Model):
         help_text="Usuario Django asociado (obligatorio)"
     )
 
-    # ✅ CAMPOS QUE SE MANTIENEN EN LA TABLA JUGADORES
+    # CAMPOS QUE SE MANTIENEN EN LA TABLA JUGADORES
     edad = models.PositiveIntegerField(
         validators=[
             MinValueValidator(8, message="La edad mínima es 8 años"),
@@ -40,7 +65,11 @@ class Jugador(models.Model):
 
     sexo = models.CharField(
         max_length=1,
-        choices=SEXO_CHOICES,
+        choices=[
+            ('M', 'Masculino'),
+            ('F', 'Femenino'),
+            ('O', 'Otro'),
+        ],
         help_text="Sexo del jugador",
         blank=True
     )
@@ -56,12 +85,7 @@ class Jugador(models.Model):
     fecha_actualizacion = models.DateTimeField(auto_now=True)
     activo = models.BooleanField(default=True)
 
-    # ❌ CAMPOS QUE YA NO EXISTEN EN LA BD:
-    # nombre = models.CharField(...)           # Eliminado - viene de user.first_name
-    # apellido = models.CharField(...)         # Eliminado - viene de user.last_name
-    # email = models.EmailField(...)           # Eliminado - viene de user.email
-    # nivel_habilidad = models.PositiveIntegerField(...)  # Eliminado completamente
-    # es_invitado = models.BooleanField(...)   # Eliminado
+    objects = JugadorManager()
 
     class Meta:
         db_table = 'jugadores'
@@ -70,45 +94,52 @@ class Jugador(models.Model):
         ordering = ['user__last_name', 'user__first_name']
 
     def __str__(self):
-        return f"{self.nombre_completo} {'(Invitado)' if self.es_jugador_invitado() else ''}"
+        return f"{self.nombre_completo} {'(Invitado)' if self.es_invitado else ''}"
 
-    # ✅ PROPIEDADES PARA ACCEDER A DATOS DE AUTH_USER
+    # ---- PROPIEDADES PARA ACCEDER A DATOS DE AUTH_USER ----
     @property
     def nombre(self):
-        """Obtiene el nombre del usuario relacionado"""
         return self.user.first_name
 
     @property
     def apellido(self):
-        """Obtiene el apellido del usuario relacionado"""
         return self.user.last_name
 
     @property
     def email(self):
-        """Obtiene el email del usuario relacionado"""
         return self.user.email
 
     @property
     def username(self):
-        """Obtiene el username del usuario relacionado"""
         return self.user.username
 
     @property
     def nombre_completo(self):
-        """Obtiene el nombre completo del usuario"""
         return f"{self.user.first_name} {self.user.last_name}".strip() or self.user.username
 
-    # ✅ MÉTODOS DE UTILIDAD
-    def es_jugador_invitado(self):
-        """Verifica si es un jugador invitado genérico por el username"""
+    # ---- PROPIEDADES ADICIONALES USADAS EN VISTAS ----
+    @property
+    def es_invitado(self):
         return self.user.username.startswith('jugador_invitado_')
 
+    @property
+    def es_registrado(self):
+        return not self.es_invitado
+
+    @property
+    def email_efectivo(self):
+        return self.user.email or "sin_email@no-definido.com"
+
+    @property
+    def nivel_habilidad(self):
+        # Si no existe el campo real, devuelve un valor por defecto
+        return getattr(self, '_nivel_habilidad', 'No definido')
+
+    # ---- MÉTODOS DE UTILIDAD ----
     def puede_hacer_reservas(self):
-        """Verifica si puede hacer reservas"""
         return self.activo
 
     def actualizar_perfil(self, nombre=None, apellido=None, email=None):
-        """Actualiza datos en auth_user"""
         if nombre:
             self.user.first_name = nombre
         if apellido:
@@ -117,62 +148,49 @@ class Jugador(models.Model):
             self.user.email = email
         self.user.save()
 
+    @classmethod
+    def crear_con_usuario(cls, username, password=None, nombre=None, apellido=None, email=None, **kwargs):
+        """Crea un Jugador junto con su usuario de Django asociado."""
+        with transaction.atomic():
+            user, created = User.objects.get_or_create(
+                username=username,
+                defaults={
+                    'first_name': nombre or "",
+                    'last_name': apellido or "",
+                    'email': email or ""
+                }
+            )
+            # Si se pasa un password, se asigna; si no, queda como no utilizable
+            if password:
+                user.set_password(password)
+            else:
+                user.set_unusable_password()
+            user.save()
 
-# ✅ MANAGER PERSONALIZADO
-class JugadorManager(models.Manager):
-    def get_queryset(self):
-        """Siempre incluye los datos del usuario"""
-        return super().get_queryset().select_related('user')
-
-    def activos(self):
-        """Solo jugadores activos"""
-        return self.filter(activo=True)
-
-    def registrados(self):
-        """Solo jugadores registrados (no invitados)"""
-        return self.exclude(user__username__startswith='jugador_invitado_')
-
-    def invitados(self):
-        """Solo jugadores invitados genéricos"""
-        return self.filter(user__username__startswith='jugador_invitado_')
-
-    def disponibles_para_invitados(self):
-        """Jugadores invitados disponibles para usar"""
-        return self.filter(
-            user__username__startswith='jugador_invitado_',
-            activo=True
-        ).order_by('user__username')
-
-
-# Asignar el manager
-Jugador.add_to_class('objects', JugadorManager())
+            jugador, _ = cls.objects.get_or_create(
+                user=user,
+                defaults=kwargs
+            )
+        return jugador
 
 
-# ✅ FUNCIONES DE UTILIDAD
+# ---- FUNCIONES DE UTILIDAD ----
 def obtener_jugador_invitado_disponible():
-    """Obtiene el primer jugador invitado disponible"""
     return Jugador.objects.disponibles_para_invitados().first()
 
-
 def obtener_todos_jugadores_invitados():
-    """Obtiene todos los jugadores invitados"""
     return Jugador.objects.disponibles_para_invitados()
 
-
 def crear_jugador_registrado(username, email, first_name, last_name, password, **kwargs):
-    """Crear jugador con usuario en una sola operación"""
-    from django.db import transaction
-
+    """Crea un jugador registrado junto con su usuario de Django (username único)."""
     with transaction.atomic():
-        # Crear usuario
+        username_unico = generar_username_unico(username)
         user = User.objects.create_user(
-            username=username,
+            username=username_unico,
             email=email,
             first_name=first_name,
             last_name=last_name,
             password=password
         )
-
-        # Crear jugador
         jugador = Jugador.objects.create(user=user, **kwargs)
         return jugador
