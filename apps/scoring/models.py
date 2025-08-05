@@ -341,8 +341,12 @@ class Punto(models.Model):
 
 
 class HistorialJugador(models.Model):
-    jugador = models.ForeignKey(Jugador, on_delete=models.CASCADE, related_name='historial')
-    partido = models.ForeignKey(Partido, on_delete=models.CASCADE, related_name='historiales')
+    jugador = models.ForeignKey(Jugador, on_delete=models.CASCADE,
+        null=True,
+        blank=True, related_name='historial')
+    partido = models.ForeignKey(Partido, on_delete=models.CASCADE,
+        null=True,
+        blank=True, related_name='historiales')
 
     # Información del partido
     es_ganador = models.BooleanField()
@@ -513,10 +517,11 @@ class Reserva(models.Model):
         help_text="Cancha reservada"
     )
 
-
     jugador = models.ForeignKey(
         'players.Jugador',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
         related_name='reservas',
         help_text="Jugador que hace la reserva"
     )
@@ -589,14 +594,148 @@ class Reserva(models.Model):
             if not Reserva.objects.filter(codigo_reserva=codigo).exists():
                 return codigo
 
+    def clean(self):
+        """Validaciones personalizadas"""
+        from decimal import Decimal
+        from django.core.exceptions import ValidationError
+        super().clean()
+
+        # 1. Calcular fecha_fin automáticamente si no está establecida
+        if self.fecha_inicio and self.duracion_minutos and not self.fecha_fin:
+            from datetime import timedelta
+            self.fecha_fin = self.fecha_inicio + timedelta(minutes=self.duracion_minutos)
+
+        # 2. Validar que no haya conflictos de horario
+        if self.fecha_inicio and self.fecha_fin and self.cancha:
+            self._validar_disponibilidad_cancha()
+
+    def _validar_disponibilidad_cancha(self):
+        """Validar que la cancha esté disponible en el horario solicitado"""
+        from django.core.exceptions import ValidationError
+
+        # Buscar reservas que se solapen en la misma cancha
+        reservas_conflicto = Reserva.objects.filter(
+            cancha=self.cancha,
+            estado__in=['Confirmada', 'En_Uso', 'Pendiente'],
+            fecha_inicio__lt=self.fecha_fin,
+            fecha_fin__gt=self.fecha_inicio
+        )
+
+        # Excluir la reserva actual si estamos editando
+        if self.pk:
+            reservas_conflicto = reservas_conflicto.exclude(pk=self.pk)
+
+        if reservas_conflicto.exists():
+            conflicto = reservas_conflicto.first()
+
+            # Determinar si es el mismo día o cruza a otro día
+            if conflicto.fecha_inicio.date() == conflicto.fecha_fin.date():
+                # Mismo día: mostrar solo las horas
+                horario_conflicto = f"{conflicto.fecha_inicio.strftime('%H:%M')} a {conflicto.fecha_fin.strftime('%H:%M')}"
+            else:
+                # Cruza días: mostrar fecha y hora completas
+                fecha_inicio_conflicto = conflicto.fecha_inicio.strftime("%d/%m %H:%M")
+                fecha_fin_conflicto = conflicto.fecha_fin.strftime("%d/%m %H:%M")
+                horario_conflicto = f"{fecha_inicio_conflicto} a {fecha_fin_conflicto}"
+
+            raise ValidationError({
+                'fecha_inicio': f'❌ CANCHA OCUPADA - Ya existe la reserva {conflicto.codigo_reserva} Selecciona otro horario disponible.'
+            })
+
     def save(self, *args, **kwargs):
-        # Generar código de reserva automáticamente
+        """Override save para aplicar cálculos automáticos y validaciones"""
+        from decimal import Decimal
+        from datetime import timedelta
+
+        print(f"DEBUG - Guardando reserva. Código actual: '{self.codigo_reserva}'")
+
+        # 1. Generar código si no existe
         if not self.codigo_reserva:
-            self.codigo_reserva = self.generar_codigo_reserva()
+            import random
+            import string
+            print("DEBUG - Generando nuevo código...")
+            while True:
+                codigo = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+                if not Reserva.objects.filter(codigo_reserva=codigo).exists():
+                    self.codigo_reserva = codigo
+                    print(f"DEBUG - Código generado: {codigo}")
+                    break
+
+        # 2. Calcular fecha_fin automáticamente
+        if self.fecha_inicio and self.duracion_minutos and not self.fecha_fin:
+            self.fecha_fin = self.fecha_inicio + timedelta(minutes=self.duracion_minutos)
+
+        # 3. Calcular precio_total automáticamente (SIEMPRE)
+        if self.duracion_minutos and self.precio_hora:
+            horas = Decimal(str(self.duracion_minutos)) / Decimal('60')
+            self.precio_total = self.precio_hora * horas
+            print(f"DEBUG - Precio calculado: {self.precio_hora} * {horas} = {self.precio_total}")
+
+        print(f"DEBUG - Código final antes de guardar: '{self.codigo_reserva}'")
+
+        # 4. Ejecutar validaciones (HABILITADAS)
+        self.full_clean()
+
         super().save(*args, **kwargs)
+        print(f"DEBUG - Reserva guardada con ID: {self.id}")
 
     def __str__(self):
         return f"Reserva {self.codigo_reserva} - {self.cancha.nombre}"
+
+    # Propiedades calculadas para el admin y API
+    @property
+    def duracion_display(self):
+        """Duración formateada para mostrar"""
+        horas = self.duracion_minutos // 60
+        minutos = self.duracion_minutos % 60
+        if horas > 0:
+            return f"{horas}h {minutos}m" if minutos > 0 else f"{horas}h"
+        return f"{minutos}m"
+
+    @property
+    def es_hoy(self):
+        """Verifica si la reserva es para hoy"""
+        from django.utils import timezone
+        return self.fecha_inicio.date() == timezone.now().date()
+
+    @property
+    def tiempo_restante(self):
+        """Tiempo restante hasta la reserva"""
+        from django.utils import timezone
+        if self.fecha_inicio > timezone.now():
+            delta = self.fecha_inicio - timezone.now()
+            horas = delta.seconds // 3600
+            minutos = (delta.seconds % 3600) // 60
+            if delta.days > 0:
+                return f"{delta.days} días"
+            elif horas > 0:
+                return f"{horas}h {minutos}m"
+            else:
+                return f"{minutos}m"
+        return "Ya comenzó"
+
+    @property
+    def puede_cancelar(self):
+        """Verifica si la reserva se puede cancelar"""
+        from django.utils import timezone
+        from datetime import timedelta
+
+        if self.estado in ['Cancelada', 'Completada', 'No_Show']:
+            return False
+
+        # Permitir cancelación hasta 2 horas antes
+        tiempo_limite = self.fecha_inicio - timedelta(hours=2)
+        return timezone.now() < tiempo_limite
+
+    @property
+    def puede_crear_partido(self):
+        """Verifica si se puede crear un partido desde esta reserva"""
+        return (
+                self.estado in ['Confirmada', 'En_Uso'] and
+                not self.partido and
+                self.jugador is not None
+        )
+
 
 
 

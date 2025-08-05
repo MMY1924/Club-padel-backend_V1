@@ -6,6 +6,10 @@ from .models import Partido, Set, Juego, Punto
 import logging
 from apps.scoring.models import HistorialJugador, EstadisticasJugador
 from django.db import transaction
+from datetime import datetime, time, timedelta
+from django.utils import timezone
+from django.db.models import Count, Sum
+from .models import Reserva, Cancha
 
 logger = logging.getLogger(__name__)
 
@@ -26,7 +30,7 @@ def crear_historial_y_actualizar_estadisticas(partido):
                 es_ganador=(equipo == equipo_ganador),
                 equipo_jugador=equipo,
                 Pareja=partido.jugador2_equipo1 if equipo == 1 else partido.jugador2_equipo2,
-                sets_ganados=0,  # TODO: reemplazar con conteo real
+                sets_ganados=0,
                 sets_perdidos=0,
                 juegos_ganados=0,
                 juegos_perdidos=0,
@@ -646,3 +650,340 @@ class PadelScoringService:
                                                                                                                       juegos_equipo1 + juegos_equipo2) > 0 else 0
             }
         }
+
+
+def obtener_horarios_disponibles(cancha, fecha, duracion_minutos=60):
+    """
+    Obtener horarios disponibles para una cancha en una fecha específica
+
+    Args:
+        cancha: Instancia de Cancha
+        fecha: datetime.date
+        duracion_minutos: int (duración mínima del slot)
+
+    Returns:
+        List de diccionarios con horarios disponibles
+    """
+    horario_apertura = 6  # 6 AM
+    horario_cierre = 22  # 10 PM
+
+    # Obtener reservas confirmadas del día
+    reservas_dia = Reserva.objects.filter(
+        cancha=cancha,
+        fecha_inicio__date=fecha,
+        estado__in=['Confirmada', 'En_Uso', 'Pendiente']
+    ).order_by('fecha_inicio')
+
+    horarios_disponibles = []
+    hora_actual = datetime.combine(fecha, time(horario_apertura))
+    hora_cierre_dt = datetime.combine(fecha, time(horario_cierre))
+
+    # Si no hay reservas
+    if not reservas_dia.exists():
+        return [{
+            'inicio': hora_actual.time(),
+            'fin': hora_cierre_dt.time(),
+            'disponible': True,
+            'duracion_minutos': (hora_cierre_dt - hora_actual).total_seconds() / 60,
+            'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, 60)
+        }]
+
+    # Verificar espacios entre reservas
+    for reserva in reservas_dia:
+        # Convertir a timezone aware si es necesario
+        if timezone.is_naive(reserva.fecha_inicio):
+            reserva_inicio = timezone.make_aware(reserva.fecha_inicio)
+        else:
+            reserva_inicio = reserva.fecha_inicio
+
+        if timezone.is_naive(reserva.fecha_fin):
+            reserva_fin = timezone.make_aware(reserva.fecha_fin)
+        else:
+            reserva_fin = reserva.fecha_fin
+
+        # Verificar si hay espacio antes de esta reserva
+        diferencia_minutos = (reserva_inicio - timezone.make_aware(hora_actual) if timezone.is_naive(
+            hora_actual) else reserva_inicio - hora_actual).total_seconds() / 60
+
+        if diferencia_minutos >= duracion_minutos:
+            horarios_disponibles.append({
+                'inicio': hora_actual.time(),
+                'fin': reserva_inicio.time(),
+                'disponible': True,
+                'duracion_minutos': int(diferencia_minutos),
+                'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, duracion_minutos)
+            })
+
+        # Actualizar hora actual al final de esta reserva
+        hora_actual = reserva_fin.replace(tzinfo=None) if timezone.is_aware(reserva_fin) else reserva_fin
+
+    # Verificar espacio después de la última reserva
+    diferencia_final = (hora_cierre_dt - hora_actual).total_seconds() / 60
+    if diferencia_final >= duracion_minutos:
+        horarios_disponibles.append({
+            'inicio': hora_actual.time(),
+            'fin': hora_cierre_dt.time(),
+            'disponible': True,
+            'duracion_minutos': int(diferencia_final),
+            'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, duracion_minutos)
+        })
+
+    return horarios_disponibles
+
+
+def calcular_precio_dinamico(cancha, fecha_inicio, duracion_minutos):
+    """
+    Calcular precio dinámico basado en horario, día, demanda y características de la cancha
+
+    Args:
+        cancha: Instancia de Cancha
+        fecha_inicio: datetime
+        duracion_minutos: int
+
+    Returns:
+        float: Precio calculado
+    """
+    # Precio base por hora según tipo de cancha
+    precios_base = {
+        'Interior': 80000,
+        'Exterior': 50000,
+        'Cubierta': 65000
+    }
+
+    precio_base = precios_base.get(cancha.tipo, 50000)
+
+    # Convertir a datetime si es necesario
+    if isinstance(fecha_inicio, datetime):
+        dt_inicio = fecha_inicio
+    else:
+        dt_inicio = datetime.combine(fecha_inicio, time(12, 0))  # Default 12:00
+
+    # Factor por horario (horario pico = más caro)
+    hora = dt_inicio.hour
+    if 18 <= hora <= 21:  # Horario pico nocturno
+        factor_horario = 1.8
+    elif 12 <= hora <= 14:  # Horario pico almuerzo
+        factor_horario = 1.4
+    elif 8 <= hora <= 10:  # Horario pico mañana
+        factor_horario = 1.3
+    elif 15 <= hora <= 17:  # Horario tarde
+        factor_horario = 1.2
+    elif 6 <= hora <= 7 or 22 <= hora <= 23:  # Horario extremo
+        factor_horario = 0.9
+    else:  # Horario valle
+        factor_horario = 1.0
+
+    # Factor por día de la semana
+    dia_semana = dt_inicio.weekday()
+    if dia_semana == 5:  # Sábado
+        factor_dia = 1.5
+    elif dia_semana == 6:  # Domingo
+        factor_dia = 1.3
+    elif dia_semana == 4:  # Viernes
+        factor_dia = 1.2
+    else:  # Lunes a Jueves
+        factor_dia = 1.0
+
+    # Factor por demanda (reservas en la misma fecha)
+    reservas_dia = Reserva.objects.filter(
+        cancha=cancha,
+        fecha_inicio__date=dt_inicio.date(),
+        estado__in=['Confirmada', 'En_Uso', 'Pendiente']
+    ).count()
+
+    # Calcular capacidad máxima de la cancha (slots de 1 hora de 6AM a 10PM = 16 slots)
+    capacidad_maxima = 16
+    ocupacion_porcentaje = (reservas_dia / capacidad_maxima) * 100
+
+    if ocupacion_porcentaje >= 80:  # Alta demanda
+        factor_demanda = 1.4
+    elif ocupacion_porcentaje >= 60:  # Demanda media-alta
+        factor_demanda = 1.2
+    elif ocupacion_porcentaje >= 40:  # Demanda media
+        factor_demanda = 1.1
+    elif ocupacion_porcentaje >= 20:  # Demanda baja-media
+        factor_demanda = 1.0
+    else:  # Baja demanda
+        factor_demanda = 0.9
+
+    # Factor por características especiales de la cancha
+    factor_caracteristicas = 1.0
+    if cancha.tiene_iluminacion:
+        factor_caracteristicas += 0.1
+    if cancha.tipo == 'Interior':
+        factor_caracteristicas += 0.2
+
+    # Factor por duración (descuento por reservas largas)
+    if duracion_minutos >= 180:  # 3+ horas
+        factor_duracion = 0.9
+    elif duracion_minutos >= 120:  # 2+ horas
+        factor_duracion = 0.95
+    else:
+        factor_duracion = 1.0
+
+    # Cálculo final
+    precio_final = (precio_base *
+                    factor_horario *
+                    factor_dia *
+                    factor_demanda *
+                    factor_caracteristicas *
+                    factor_duracion)
+
+    # Redondear a miles
+    precio_final = round(precio_final, -3)
+
+    # Asegurar precio mínimo
+    precio_minimo = 30000
+    return max(precio_final, precio_minimo)
+
+
+def obtener_disponibilidad_multiple_canchas(fecha, duracion_minutos=60):
+    """
+    Obtener disponibilidad de todas las canchas para una fecha
+
+    Args:
+        fecha: datetime.date
+        duracion_minutos: int
+
+    Returns:
+        Dict con disponibilidad por cancha
+    """
+    canchas_activas = Cancha.objects.filter(activa=True).order_by('numero')
+    disponibilidad = {}
+
+    for cancha in canchas_activas:
+        horarios = obtener_horarios_disponibles(cancha, fecha, duracion_minutos)
+        disponibilidad[cancha.id] = {
+            'cancha': {
+                'id': str(cancha.id),
+                'nombre': cancha.nombre,
+                'numero': cancha.numero,
+                'tipo': cancha.tipo,
+                'tiene_iluminacion': cancha.tiene_iluminacion
+            },
+            'horarios_disponibles': horarios,
+            'total_horas_disponibles': sum(h['duracion_minutos'] for h in horarios) / 60,
+            'precio_promedio': sum(h['precio_sugerido'] for h in horarios) / len(horarios) if horarios else 0
+        }
+
+    return disponibilidad
+
+
+def calcular_mejor_horario(cancha, fecha, duracion_minutos=60, prioridad='precio'):
+    """
+    Encontrar el mejor horario según criterio
+
+    Args:
+        cancha: Instancia de Cancha
+        fecha: datetime.date
+        duracion_minutos: int
+        prioridad: str ('precio', 'horario', 'duracion')
+
+    Returns:
+        Dict con la mejor opción
+    """
+    horarios = obtener_horarios_disponibles(cancha, fecha, duracion_minutos)
+
+    if not horarios:
+        return None
+
+    if prioridad == 'precio':
+        # Menor precio
+        mejor = min(horarios, key=lambda x: x['precio_sugerido'])
+    elif prioridad == 'horario':
+        # Mejor horario (más cercano a las 7 PM)
+        hora_ideal = time(19, 0)  # 7 PM
+        mejor = min(horarios, key=lambda x: abs(
+            (datetime.combine(fecha, x['inicio']) - datetime.combine(fecha, hora_ideal)).total_seconds()))
+    elif prioridad == 'duracion':
+        # Mayor duración disponible
+        mejor = max(horarios, key=lambda x: x['duracion_minutos'])
+    else:
+        mejor = horarios[0]
+
+    return mejor
+
+
+def obtener_horarios_disponibles_mejorado(cancha, fecha, duracion_minutos=60, incluir_conflictos=False):
+    """
+    Versión mejorada que incluye información sobre conflictos
+    """
+    from datetime import datetime, time, timedelta
+    from django.utils import timezone
+    
+    horario_apertura = 6  # 6 AM
+    horario_cierre = 22   # 10 PM
+    
+    # Obtener reservas confirmadas del día
+    reservas_dia = Reserva.objects.filter(
+        cancha=cancha,
+        fecha_inicio__date=fecha,
+        estado__in=['Confirmada', 'En_Uso', 'Pendiente']
+    ).order_by('fecha_inicio')
+    
+    horarios_disponibles = []
+    horarios_ocupados = []
+    
+    hora_actual = datetime.combine(fecha, time(horario_apertura))
+    hora_cierre_dt = datetime.combine(fecha, time(horario_cierre))
+    
+    # Procesar reservas existentes
+    for reserva in reservas_dia:
+        # Convertir a timezone aware si es necesario
+        if timezone.is_naive(reserva.fecha_inicio):
+            reserva_inicio = timezone.make_aware(reserva.fecha_inicio)
+        else:
+            reserva_inicio = reserva.fecha_inicio
+            
+        if timezone.is_naive(reserva.fecha_fin):
+            reserva_fin = timezone.make_aware(reserva.fecha_fin)
+        else:
+            reserva_fin = reserva.fecha_fin
+        
+        # Agregar horario ocupado
+        horarios_ocupados.append({
+            'inicio': reserva_inicio.time(),
+            'fin': reserva_fin.time(),
+            'codigo_reserva': reserva.codigo_reserva,
+            'estado': reserva.estado,
+            'jugador': str(reserva.jugador) if reserva.jugador else 'Reserva anónima'
+        })
+        
+        # Verificar si hay espacio antes de esta reserva
+        hora_actual_aware = timezone.make_aware(hora_actual) if timezone.is_naive(hora_actual) else hora_actual
+        diferencia_minutos = (reserva_inicio - hora_actual_aware).total_seconds() / 60
+        
+        if diferencia_minutos >= duracion_minutos:
+            horarios_disponibles.append({
+                'inicio': hora_actual.time(),
+                'fin': reserva_inicio.time(),
+                'disponible': True,
+                'duracion_minutos': int(diferencia_minutos),
+                'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, duracion_minutos)
+            })
+        
+        # Actualizar hora actual al final de esta reserva
+        hora_actual = reserva_fin.replace(tzinfo=None) if timezone.is_aware(reserva_fin) else reserva_fin
+    
+    # Verificar espacio después de la última reserva
+    diferencia_final = (hora_cierre_dt - hora_actual).total_seconds() / 60
+    if diferencia_final >= duracion_minutos:
+        horarios_disponibles.append({
+            'inicio': hora_actual.time(),
+            'fin': hora_cierre_dt.time(),
+            'disponible': True,
+            'duracion_minutos': int(diferencia_final),
+            'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, duracion_minutos)
+        })
+    
+    resultado = {
+        'horarios_disponibles': horarios_disponibles,
+        'total_slots_disponibles': len(horarios_disponibles),
+        'horas_totales_disponibles': sum(h['duracion_minutos'] for h in horarios_disponibles) / 60
+    }
+    
+    if incluir_conflictos:
+        resultado['horarios_ocupados'] = horarios_ocupados
+        resultado['total_reservas_existentes'] = len(horarios_ocupados)
+    
+    return resultado

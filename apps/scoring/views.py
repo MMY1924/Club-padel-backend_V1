@@ -11,8 +11,6 @@ from django.db.models import Q, Count, Avg
 from django_filters.rest_framework import DjangoFilterBackend
 from datetime import datetime, timedelta
 from .permissions import IsPlayerInMatch
-from rest_framework.decorators import action
-from rest_framework import status
 from apps.scoring.services import crear_historial_y_actualizar_estadisticas
 
 from .models import (
@@ -227,14 +225,14 @@ class PartidoViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
     filterset_fields = ['modalidad', 'estado', 'tipo', 'cancha']
     search_fields = ['jugador1_equipo1__nombre', 'jugador1_equipo2__nombre']
-    ordering_fields = ['fecha_creacion', 'fecha_inicio']
+    ordering_fields = ['fecha_creacion', 'fecha_inicio', 'fecha_fin']
     ordering = ['-fecha_creacion']
 
     def get_queryset(self):
         queryset = Partido.objects.all()
 
-        # Filtros adicionales
-        if self.request.query_params.get('en_juego'):
+        # Filtro por partidos activos
+        if self.request.query_params.get('activos'):
             queryset = queryset.filter(estado='En Juego')
 
         if self.request.query_params.get('jugador_id'):
@@ -250,6 +248,7 @@ class PartidoViewSet(viewsets.ModelViewSet):
             'cancha',
             'jugador1_equipo1', 'jugador2_equipo1',
             'jugador1_equipo2', 'jugador2_equipo2'
+
         )
 
     def get_serializer_class(self):
@@ -378,7 +377,6 @@ class PartidoViewSet(viewsets.ModelViewSet):
                 status=status.HTTP_500_INTERNAL_SERVER_ERROR
             )
 
-
     @action(detail=True, methods=['post'])
     def deshacer_punto(self, request, pk=None):
         """Deshace el último punto"""
@@ -447,7 +445,6 @@ class SetViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet de solo lectura para sets"""
     queryset = Set.objects.all()
     serializer_class = SetSerializer
-    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['partido', 'finalizado', 'equipo_ganador']
 
@@ -470,7 +467,6 @@ class JuegoViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet de solo lectura para juegos"""
     queryset = Juego.objects.all()
     serializer_class = JuegoSerializer
-    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend]
     filterset_fields = ['set', 'finalizado', 'equipo_ganador', 'equipo_que_saca']
 
@@ -493,7 +489,6 @@ class PuntoViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet de solo lectura para puntos"""
     queryset = Punto.objects.all()
     serializer_class = PuntoSerializer
-    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['juego', 'equipo_ganador', 'tipo_punto']
     ordering_fields = ['numero_punto', 'timestamp']
@@ -523,7 +518,6 @@ class HistorialJugadorViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet de solo lectura para historial de jugadores"""
     queryset = HistorialJugador.objects.all()
     serializer_class = HistorialJugadorSerializer
-    permission_classes = [AllowAny]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['jugador', 'partido', 'es_ganador', 'equipo_jugador']
     ordering_fields = ['fecha_partido']
@@ -544,15 +538,17 @@ class HistorialJugadorViewSet(viewsets.ReadOnlyModelViewSet):
         # Solo partidos finalizados
         queryset = queryset.filter(partido__estado='Finalizado')
 
-        return queryset.select_related('jugador', 'partido', 'Pareja')
+        return queryset.select_related('jugador', 'partido')
 
 
+# ==========================================
+# VIEWSET DE ESTADÍSTICAS JUGADOR
+# ==========================================
 
 class EstadisticasJugadorViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet de solo lectura para estadísticas de jugadores"""
     queryset = EstadisticasJugador.objects.all()
     serializer_class = EstadisticasJugadorSerializer
-    permission_classes = [AllowAny]
     filter_backends = [filters.OrderingFilter]
     ordering_fields = ['partidos_ganados', 'racha_actual_victorias']
     ordering = ['-partidos_ganados']
@@ -595,6 +591,10 @@ class EstadisticasJugadorViewSet(viewsets.ReadOnlyModelViewSet):
         return Response(serializer.data)
 
 
+# ==========================================
+# VIEWSET DE RESERVA
+# ==========================================
+
 class ReservaViewSet(viewsets.ModelViewSet):
     """
     ViewSet para gestión de reservas.
@@ -604,13 +604,17 @@ class ReservaViewSet(viewsets.ModelViewSet):
     - POST /reservas/{id}/cancelar/ - Cancelar reserva
     - POST /reservas/{id}/cambiar_estado/ - Cambiar estado
     - POST /reservas/{id}/crear_partido/ - Crear partido desde reserva
-    - GET /reservas/calendario/ - Ver calendario de reservas
+    - GET /reservas/calendario/ - Vista calendario
+    - GET /reservas/disponibilidad/ - Verificar disponibilidad
+    - GET /reservas/calcular_precio/ - Calcular precio dinámico
+    - GET /reservas/mejor_horario/ - Mejor horario según criterio
     """
 
+    queryset = Reserva.objects.all()
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['cancha', 'estado', 'tipo_reserva', 'pagado']
-    search_fields = ['codigo_reserva', 'jugador__nombre', 'observaciones']
-    ordering_fields = ['fecha_inicio', 'fecha_creacion']
+    filterset_fields = ['cancha', 'estado', 'tipo_reserva', 'jugador', 'fecha_inicio__date']
+    search_fields = ['codigo_reserva', 'jugador__nombre', 'jugador__apellido']
+    ordering_fields = ['fecha_inicio', 'fecha_creacion', 'precio_total']
     ordering = ['fecha_inicio']
 
     def get_queryset(self):
@@ -634,36 +638,44 @@ class ReservaViewSet(viewsets.ModelViewSet):
         return queryset.select_related('cancha', 'jugador', 'partido')
 
     def get_serializer_class(self):
-        if self.action == 'list':
-            return ReservaListSerializer
-        elif self.action == 'create':
+        """Usar diferentes serializers según la acción"""
+        if self.action == 'create':
             return ReservaCreateSerializer
-        elif self.action == 'cambiar_estado':
-            return CambiarEstadoReservaSerializer
-        elif self.action == 'crear_partido':
-            return CrearPartidoDesdeReservaSerializer
+        elif self.action == 'list':
+            return ReservaListSerializer
         return ReservaSerializer
 
     def get_permissions(self):
-        if self.action in ['list', 'retrieve', 'calendario']:
-            return [AllowAny()]
-        return [IsAuthenticated()]
+        """Permisos según la acción"""
+        if self.action in ['disponibilidad', 'calcular_precio', 'mejor_horario', 'list', 'retrieve', 'calendario']:
+            permission_classes = [AllowAny]
+        else:
+            permission_classes = [IsAuthenticated]
+
+        return [permission() for permission in permission_classes]
 
     def perform_create(self, serializer):
         """Al crear, calcular precio total"""
         with transaction.atomic():
-            reserva = serializer.save()
+            # Obtener datos antes de guardar
+            precio_hora = serializer.validated_data.get('precio_hora', 0)
+            duracion_minutos = serializer.validated_data.get('duracion_minutos', 60)
 
             # Calcular precio total
-            horas = reserva.duracion_minutos / 60
-            reserva.precio_total = reserva.precio_hora * horas
-            reserva.save()
+            horas = duracion_minutos / 60
+            precio_total = precio_hora * horas
 
-            # Si la reserva es inmediata, cambiar estado de cancha
-            if reserva.fecha_inicio <= timezone.now() + timedelta(minutes=30):
-                if reserva.cancha.estado == 'Disponible':
-                    reserva.cancha.estado = 'Ocupada'
-                    reserva.cancha.save()
+            # Generar código de reserva único
+            import random
+            import string
+            codigo_reserva = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+            while Reserva.objects.filter(codigo_reserva=codigo_reserva).exists():
+                codigo_reserva = ''.join(random.choices(string.ascii_uppercase + string.digits, k=8))
+
+            print(f"DEBUG - Precio hora: {precio_hora}, Duración: {duracion_minutos} min, Precio total: {precio_total}")
+
+            # Guardar con el precio total calculado y código generado
+            reserva = serializer.save(precio_total=precio_total, codigo_reserva=codigo_reserva)
 
     @action(detail=True, methods=['post'])
     def confirmar(self, request, pk=None):
@@ -773,10 +785,9 @@ class ReservaViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=['post'])
     def crear_partido(self, request, pk=None):
-        """Crea un partido desde una reserva"""
+        """Crear partido desde reserva"""
         reserva = self.get_object()
 
-        # Validaciones
         if reserva.partido:
             return Response(
                 {"detail": "Esta reserva ya tiene un partido asociado"},
@@ -907,3 +918,106 @@ class ReservaViewSet(viewsets.ModelViewSet):
             'total_reservas': reservas.count(),
             'calendario': calendario
         })
+
+    @action(detail=False, methods=['get'])
+    def disponibilidad(self, request):
+        """Obtener disponibilidad de canchas para una fecha"""
+        from .services import obtener_disponibilidad_multiple_canchas, obtener_horarios_disponibles
+        from datetime import datetime
+
+        fecha_str = request.query_params.get('fecha')
+        cancha_id = request.query_params.get('cancha')
+        duracion = int(request.query_params.get('duracion', 60))
+
+        if not fecha_str:
+            return Response({'error': 'Parámetro fecha requerido'}, status=400)
+
+        try:
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+        except ValueError:
+            return Response({'error': 'Formato de fecha inválido'}, status=400)
+
+        if cancha_id:
+            try:
+                cancha = Cancha.objects.get(id=cancha_id)
+                horarios = obtener_horarios_disponibles(cancha, fecha, duracion)
+
+                return Response({
+                    'fecha': fecha_str,
+                    'cancha': {'id': str(cancha.id), 'nombre': cancha.nombre},
+                    'horarios_disponibles': horarios,
+                    'total_slots': len(horarios)
+                })
+            except Cancha.DoesNotExist:
+                return Response({'error': 'Cancha no encontrada'}, status=404)
+        else:
+            disponibilidad = obtener_disponibilidad_multiple_canchas(fecha, duracion)
+            return Response({'fecha': fecha_str, 'canchas': disponibilidad})
+
+    @action(detail=False, methods=['get'])
+    def calcular_precio(self, request):
+        """Calcular precio dinámico"""
+        from .services import calcular_precio_dinamico
+        from datetime import datetime
+
+        cancha_id = request.query_params.get('cancha')
+        fecha_str = request.query_params.get('fecha')
+        hora_str = request.query_params.get('hora', '12:00')
+        duracion = int(request.query_params.get('duracion', 60))
+
+        if not cancha_id or not fecha_str:
+            return Response({'error': 'Cancha y fecha requeridos'}, status=400)
+
+        try:
+            cancha = Cancha.objects.get(id=cancha_id)
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+            hora = datetime.strptime(hora_str, '%H:%M').time()
+            fecha_hora = datetime.combine(fecha, hora)
+
+            precio = calcular_precio_dinamico(cancha, fecha_hora, duracion)
+
+            return Response({
+                'cancha': cancha.nombre,
+                'fecha_hora': f'{fecha_str} {hora_str}',
+                'precio_por_hora': precio,
+                'precio_total': (precio * duracion) / 60
+            })
+
+        except Cancha.DoesNotExist:
+            return Response({'error': 'Cancha no encontrada'}, status=404)
+        except ValueError:
+            return Response({'error': 'Formato inválido'}, status=400)
+
+    @action(detail=False, methods=['get'])
+    def mejor_horario(self, request):
+        """Mejor horario según criterio"""
+        from .services import calcular_mejor_horario
+        from datetime import datetime
+
+        cancha_id = request.query_params.get('cancha')
+        fecha_str = request.query_params.get('fecha')
+        prioridad = request.query_params.get('prioridad', 'precio')
+
+        if not cancha_id or not fecha_str:
+            return Response({'error': 'Cancha y fecha requeridos'}, status=400)
+
+        try:
+            cancha = Cancha.objects.get(id=cancha_id)
+            fecha = datetime.strptime(fecha_str, '%Y-%m-%d').date()
+
+            mejor = calcular_mejor_horario(cancha, fecha, 60, prioridad)
+
+            if not mejor:
+                return Response({'mensaje': 'No hay horarios disponibles'})
+
+            return Response({
+                'cancha': cancha.nombre,
+                'fecha': fecha_str,
+                'criterio': prioridad,
+                'recomendacion': mejor
+            })
+
+        except Cancha.DoesNotExist:
+            return Response({'error': 'Cancha no encontrada'}, status=404)
+        except ValueError:
+            return Response({'error': 'Formato inválido'}, status=400)
