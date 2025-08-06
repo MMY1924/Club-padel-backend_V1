@@ -10,9 +10,8 @@ from apps.players.models import Jugador
 from apps.scoring.models import Partido, Cancha
 
 
-# ==========================================
 # SERIALIZERS BÁSICOS
-# ==========================================
+
 
 class CanchaSimpleSerializer(serializers.ModelSerializer):
     """Serializer simple para canchas"""
@@ -45,9 +44,9 @@ class PartidoSimpleSerializer(serializers.ModelSerializer):
         ]
 
 
-# ==========================================
+
 # SERIALIZERS DE TORNEO
-# ==========================================
+
 
 class TorneoListSerializer(serializers.ModelSerializer):
     """Serializer para listado de torneos"""
@@ -138,9 +137,9 @@ class TorneoCreateSerializer(serializers.ModelSerializer):
         return torneo
 
 
-# ==========================================
+
 # SERIALIZERS DE INSCRIPCIÓN
-# ==========================================
+
 
 class InscripcionListSerializer(serializers.ModelSerializer):
     """Serializer para listado de inscripciones"""
@@ -234,9 +233,9 @@ class InscripcionCreateSerializer(serializers.ModelSerializer):
             return inscripcion
 
 
-# ==========================================
+
 # SERIALIZERS DE FASE Y GRUPO
-# ==========================================
+
 
 class FaseTorneoSerializer(serializers.ModelSerializer):
     """Serializer para fases del torneo"""
@@ -288,9 +287,7 @@ class GrupoTorneoSerializer(serializers.ModelSerializer):
         ]
 
 
-# ==========================================
 # SERIALIZERS DE PARTIDO TORNEO
-# ==========================================
 
 class PartidoTorneoListSerializer(serializers.ModelSerializer):
     """Serializer para listado de partidos del torneo"""
@@ -332,9 +329,7 @@ class PartidoTorneoUpdateSerializer(serializers.ModelSerializer):
         fields = ['fecha_programada', 'cancha_asignada', 'notas']
 
 
-# ==========================================
 # SERIALIZERS DE CLASIFICACIÓN
-# ==========================================
 
 class ClasificacionSerializer(serializers.ModelSerializer):
     """Serializer para clasificación final"""
@@ -357,9 +352,7 @@ class ClasificacionSerializer(serializers.ModelSerializer):
         return round((obj.partidos_ganados / obj.partidos_jugados) * 100, 1)
 
 
-# ==========================================
 # SERIALIZERS DE ESTADO Y ESTADÍSTICAS
-# ==========================================
 
 class TorneoStatusSerializer(serializers.Serializer):
     """Serializer para estado del torneo"""
@@ -405,3 +398,80 @@ class ProgramarPartidosSerializer(serializers.Serializer):
                 "La fecha de inicio debe ser futura"
             )
         return value
+
+# 7. FUNCIONES DE USUARIO FINAL
+
+def explain_tournament_type(tournament_type):
+    """Explica un tipo de torneo de forma simple"""
+    explanations = {
+        'Eliminacion': """
+         ELIMINACIÓN DIRECTA
+
+        ¿Cómo funciona?
+        • Pierdes un partido = quedas eliminado
+        • Los ganadores avanzan a la siguiente ronda
+        • Continúa hasta que quede solo 1 campeón
+
+        Ejemplo con 8 equipos:
+        Cuartos → 8 equipos → 4 ganadores
+        Semis   → 4 equipos → 2 ganadores  
+        Final   → 2 equipos → 1 campeón
+
+        """,
+
+        'Ranking': """
+         LIGA/RANKING
+
+        ¿Cómo funciona?
+        • Todos juegan contra todos
+        • Se suman puntos: Victoria = 3, Derrota = 0
+        • El que más puntos tenga al final gana
+
+        Ejemplo con 4 equipos (6 partidos):
+        A vs B, A vs C, A vs D
+        B vs C, B vs D, C vs D
+
+        """,
+
+        'Grupos': """
+         GRUPOS + ELIMINACIÓN
+
+        ¿Cómo funciona?
+        • Los equipos se dividen en grupos
+        • En cada grupo juegan todos contra todos
+        • Los mejores de cada grupo clasifican
+        • Los clasificados juegan eliminación directa
+
+        Ejemplo con 8 equipos:
+        Grupo A (4 equipos) → 2 mejores clasifican
+        Grupo B (4 equipos) → 2 mejores clasifican
+        Final entre los 4 clasificados
+        """
+    }
+
+    return explanations.get(tournament_type, "Tipo de torneo no reconocido")
+
+# EJEMPLO DE USO
+
+"""
+# Para usar desde el shell:
+
+from apps.tournaments.flow_services import *
+
+# Ver flujo de un torneo específico
+torneo = Torneo.objects.first()
+flow_service = TournamentFlowService(torneo)
+flow_data = flow_service.get_tournament_flow()
+
+# Crear flujo interactivo
+create_interactive_tournament_flow()
+
+# Probar todos los flujos
+test_all_tournament_flows()
+
+# Explicar un tipo
+print(explain_tournament_type('Eliminacion'))
+
+# Generar reporte
+report = generate_flow_report(torneo.id)
+"""

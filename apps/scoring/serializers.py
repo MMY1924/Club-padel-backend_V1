@@ -9,11 +9,7 @@ from .models import (
 )
 from apps.players.models import Jugador
 
-
-# ==========================================
 # SERIALIZERS PARA CANCHA
-# ==========================================
-
 class CanchaSerializer(serializers.ModelSerializer):
     partidos_activos = serializers.SerializerMethodField()
 
@@ -97,11 +93,7 @@ class CanchaConReservasSerializer(CanchaSerializer):
 
         return not reserva_actual and obj.estado == 'Disponible'
 
-
-# ==========================================
 # SERIALIZERS PARA PARTIDO
-# ==========================================
-
 class PartidoSerializer(serializers.ModelSerializer):
     # Información adicional calculada
     equipo1_display = serializers.SerializerMethodField()
@@ -283,11 +275,7 @@ class PartidoListSerializer(serializers.ModelSerializer):
     def get_cancha_nombre(self, obj):
         return obj.cancha.nombre if obj.cancha else None
 
-
-# ==========================================
 # SERIALIZERS BÁSICOS PARA GAME OBJECTS
-# ==========================================
-
 class SetSerializer(serializers.ModelSerializer):
     class Meta:
         model = Set
@@ -494,10 +482,7 @@ class ReservaCreateSerializer(serializers.ModelSerializer):
 
         return data
 
-
-# ==========================================
 # SERIALIZERS PARA ENDPOINTS ESPECIALES
-# ==========================================
 
 class AddPointSerializer(serializers.Serializer):
     """Serializer para agregar puntos"""

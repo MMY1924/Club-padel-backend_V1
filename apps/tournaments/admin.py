@@ -11,9 +11,8 @@ from .models import (
 from .services import TournamentService
 
 
-# ==========================================
 # INLINES
-# ==========================================
+
 class InscripcionInline(admin.TabularInline):
     model = InscripcionTorneo
     extra = 0
@@ -46,9 +45,8 @@ class PartidoTorneoInline(admin.TabularInline):
     partido_link.short_description = 'Partido'
 
 
-# ==========================================
 # ADMIN PARA TORNEO
-# ==========================================
+
 @admin.register(Torneo)
 class TorneoAdmin(admin.ModelAdmin):
     list_display = [
@@ -231,9 +229,9 @@ class TorneoAdmin(admin.ModelAdmin):
     ver_estado_detallado.short_description = "Ver estado detallado"
 
 
-# ==========================================
+
 # ADMIN PARA INSCRIPCIÓN
-# ==========================================
+
 @admin.register(InscripcionTorneo)
 class InscripcionTorneoAdmin(admin.ModelAdmin):
     list_display = [
@@ -318,9 +316,9 @@ class InscripcionTorneoAdmin(admin.ModelAdmin):
     cancelar_inscripciones.short_description = "Cancelar inscripciones"
 
 
-# ==========================================
+
 # ADMIN PARA FASE
-# ==========================================
+
 @admin.register(FaseTorneo)
 class FaseTorneoAdmin(admin.ModelAdmin):
     list_display = [
@@ -365,9 +363,9 @@ class FaseTorneoAdmin(admin.ModelAdmin):
     partidos_info.short_description = 'Partidos'
 
 
-# ==========================================
+
 # ADMIN PARA GRUPO
-# ==========================================
+
 @admin.register(GrupoTorneo)
 class GrupoTorneoAdmin(admin.ModelAdmin):
     list_display = ['nombre', 'fase', 'participantes_count', 'ver_tabla']
@@ -407,9 +405,8 @@ class GrupoTorneoAdmin(admin.ModelAdmin):
     mostrar_tabla_posiciones.short_description = "Ver tabla de posiciones"
 
 
-# ==========================================
 # ADMIN PARA PARTIDO TORNEO
-# ==========================================
+
 @admin.register(PartidoTorneo)
 class PartidoTorneoAdmin(admin.ModelAdmin):
     list_display = [
@@ -586,9 +583,7 @@ class PartidoTorneoAdmin(admin.ModelAdmin):
     procesar_resultados.short_description = "Procesar resultados"
 
 
-# ==========================================
 # ADMIN PARA CLASIFICACIÓN
-# ==========================================
 @admin.register(ClasificacionTorneo)
 class ClasificacionTorneoAdmin(admin.ModelAdmin):
     list_display = [

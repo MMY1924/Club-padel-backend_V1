@@ -1,47 +1,210 @@
-# Django Backend - .gitignore Limpio
+# ==============================================
+# PADEL BACKEND - .gitignore PROFESIONAL
+# ==============================================
 
-# Python
+# ============ PYTHON ============
 __pycache__/
 *.py[cod]
 *$py.class
 *.so
+*.egg
+*.egg-info/
+dist/
+build/
+develop-eggs/
+.installed.cfg
+MANIFEST
 
-# Entornos virtuales
+# ============ DJANGO ============
+# Base de datos local
+*.sqlite3
+*.db
+
+# Archivos de log
+*.log
+logs/
+django.log
+
+# Media files (uploads de usuarios)
+media/
+!media/.gitkeep
+
+# Archivos estáticos compilados
+staticfiles/
+static_root/
+collected_static/
+
+# Migraciones temporales (mantener las iniciales)
+# */migrations/*
+# !*/migrations/__init__.py
+# !*/migrations/0001_initial.py
+
+# Cache de Django
+django_cache/
+
+# ============ ENTORNOS VIRTUALES ============
 .venv/
 venv/
 env/
+.env/
+ENV/
+env.bak/
+venv.bak/
 
-# Django
-*.log
-db.sqlite3
-media/uploads/
-staticfiles/
+# ============ VARIABLES DE ENTORNO ============
+.env
+.env.local
+.env.production
+.env.staging
+.env.development
+local_settings.py
+production_settings.py
 
-# IDE - PyCharm/IntelliJ
+# ============ IDE - PyCharm/IntelliJ ============
 .idea/
 *.iws
 *.iml
 *.ipr
+.idea_modules/
 
-# IDE - VS Code
+# ============ IDE - VS Code ============
 .vscode/
 *.code-workspace
+.history/
 
-# OS
+# ============ SISTEMA OPERATIVO ============
+# macOS
 .DS_Store
+.AppleDouble
+.LSOverride
+Icon?
+
+# Windows
 Thumbs.db
-*~
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
 
-# Flutter - Ignorar TODO
-flutter_app/
-flutter_sdk/
-fluttersdk/
-*.dart
+# Linux
+.nfs*
 
-# Temporales y basura
-*.tmp
+# ============ TESTING Y COVERAGE ============
+.coverage
+.pytest_cache/
+.tox/
+.nox/
+htmlcov/
+.coverage.*
+coverage.xml
+*.cover
+.hypothesis/
+
+# Test files
+**/tests.py
+**/test_*.py
+**/tests_*.py
+test_*.py
+tests_*.py
+tests/
+test/
+
+# ============ JUPYTER NOTEBOOKS ============
+.ipynb_checkpoints
+*.ipynb
+
+# ============ DOCUMENTACIÓN BUILD ============
+docs/_build/
+site/
+
+# ============ HERRAMIENTAS DE LINTING ============
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyre/
+.pytype/
+
+# ============ CERTIFICADOS Y CLAVES ============
+*.pem
+*.key
+*.crt
+*.p12
+*.jks
+secrets/
+certificates/
+
+# ============ DOCKER ============
+.dockerignore
+Dockerfile.local
+docker-compose.override.yml
+
+# ============ REDIS/CELERY ============
+celerybeat-schedule
+celerybeat.pid
+
+# ============ WEBPACK/NODE (si usas frontend) ============
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.npm
+.eslintcache
+
+# ============ BACKUPS Y TEMPORALES ============
 *.backup
 *.bak
+*.swp
+*.swo
+*.tmp
+*.temp
+*~
+.#*
+\#*#
+.*.sw[a-z]
 *.orig
-j
-logs/
+
+# ============ ARCHIVOS ESPECÍFICOS DEL PROYECTO ============
+# Archivos de configuración local
+local_config.py
+dev_settings.py
+
+# Dumps de base de datos
+*.sql
+*.dump
+db_backup/
+database_dumps/
+
+# Archivos de deployment
+deploy/
+deployment/
+.deployment
+
+# ============ EXCLUIR EXPLÍCITAMENTE ============
+# Frontend build (si tienes)
+/frontend/build/
+/frontend/dist/
+
+# Logs específicos del proyecto
+padel_backend.log
+scoring.log
+
+# ============ MANTENER ARCHIVOS IMPORTANTES ============
+# Mantener estructura de directorios
+!*/.gitkeep
+!*/README.md
+
+# Mantener archivos de requirements
+!requirements*.txt
+!Pipfile
+!pyproject.toml
+
+# Mantener archivos de configuración base
+!manage.py
+!*/settings.py
+!*/urls.py
+!*/wsgi.py
+!*/asgi.py
+
+# Mantener migraciones iniciales
+!*/migrations/
+!*/migrations/__init__.py
+!*/migrations/0001_initial.py

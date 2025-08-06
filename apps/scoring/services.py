@@ -44,7 +44,7 @@ def crear_historial_y_actualizar_estadisticas(partido):
             actualizar_estadisticas_jugador(jugador)
 
 def actualizar_estadisticas_jugador(jugador):
-    """Recalcula las estadísticas de un jugador en base a su historial"""
+    """Recalcula las estadísticas de un jugador con base en su historial"""
     historial = HistorialJugador.objects.filter(jugador=jugador)
     if not historial.exists():
         return
@@ -519,11 +519,11 @@ class PadelScoringService:
 
         return historial
 
-    # ===== MÉTODOS ESTÁTICOS PARA USAR SIN INSTANCIA =====
+    # MÉTODOS ESTÁTICOS PARA USAR SIN INSTANCIA
 
     @staticmethod
     def procesar_punto_simple(juego, equipo_ganador, descripcion=""):
-        """Método simple para procesar un punto directamente (sin lógica completa)"""
+        """Metodo simple para procesar un punto directamente (sin lógica completa)"""
         with transaction.atomic():
             # Crear punto
             numero_punto = juego.puntos.count() + 1
@@ -658,7 +658,7 @@ def obtener_horarios_disponibles(cancha, fecha, duracion_minutos=60):
 
     Args:
         cancha: Instancia de Cancha
-        fecha: datetime.date
+        fecha: datetime. Date
         duracion_minutos: int (duración mínima del slot)
 
     Returns:
@@ -702,7 +702,7 @@ def obtener_horarios_disponibles(cancha, fecha, duracion_minutos=60):
             reserva_fin = reserva.fecha_fin
 
         # Verificar si hay espacio antes de esta reserva
-        diferencia_minutos = (reserva_inicio - timezone.make_aware(hora_actual) if timezone.is_naive(
+        diferencia_minutos = int(reserva_inicio - timezone.make_aware(hora_actual) if timezone.is_naive(
             hora_actual) else reserva_inicio - hora_actual).total_seconds() / 60
 
         if diferencia_minutos >= duracion_minutos:
@@ -710,7 +710,7 @@ def obtener_horarios_disponibles(cancha, fecha, duracion_minutos=60):
                 'inicio': hora_actual.time(),
                 'fin': reserva_inicio.time(),
                 'disponible': True,
-                'duracion_minutos': int(diferencia_minutos),
+                'duracion_minutos': (diferencia_minutos),
                 'precio_sugerido': calcular_precio_dinamico(cancha, hora_actual, duracion_minutos)
             })
 
@@ -842,7 +842,7 @@ def obtener_disponibilidad_multiple_canchas(fecha, duracion_minutos=60):
     Obtener disponibilidad de todas las canchas para una fecha
 
     Args:
-        fecha: datetime.date
+        fecha: datetime. Date
         duracion_minutos: int
 
     Returns:
@@ -875,7 +875,7 @@ def calcular_mejor_horario(cancha, fecha, duracion_minutos=60, prioridad='precio
 
     Args:
         cancha: Instancia de Cancha
-        fecha: datetime.date
+        fecha: datetime. Date
         duracion_minutos: int
         prioridad: str ('precio', 'horario', 'duracion')
 

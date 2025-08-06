@@ -12,4 +12,4 @@ class ScoringConfig(AppConfig):
         Importa las señales para que se registren automáticamente.
         """
         import apps.scoring.signals
-        print("✅ Señales de scoring cargadas automáticamente")
+        print(" Señales de scoring cargadas automáticamente")

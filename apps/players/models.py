@@ -80,7 +80,7 @@ class Jugador(models.Model):
         help_text="Teléfono de contacto"
     )
 
-    # Campos de control
+    # CAMPOS DE CONTROL
     fecha_creacion = models.DateTimeField(auto_now_add=True)
     fecha_actualizacion = models.DateTimeField(auto_now=True)
     activo = models.BooleanField(default=True)
@@ -96,7 +96,7 @@ class Jugador(models.Model):
     def __str__(self):
         return f"{self.nombre_completo} {'(Invitado)' if self.es_invitado else ''}"
 
-    # ---- PROPIEDADES PARA ACCEDER A DATOS DE AUTH_USER ----
+    #  PROPIEDADES PARA ACCEDER A DATOS DE AUTH_USER -
     @property
     def nombre(self):
         return self.user.first_name
@@ -117,7 +117,7 @@ class Jugador(models.Model):
     def nombre_completo(self):
         return f"{self.user.first_name} {self.user.last_name}".strip() or self.user.username
 
-    # ---- PROPIEDADES ADICIONALES USADAS EN VISTAS ----
+    #  PROPIEDADES ADICIONALES USADAS EN VISTAS
     @property
     def es_invitado(self):
         return self.user.username.startswith('jugador_invitado_')
@@ -135,7 +135,7 @@ class Jugador(models.Model):
         # Si no existe el campo real, devuelve un valor por defecto
         return getattr(self, '_nivel_habilidad', 'No definido')
 
-    # ---- MÉTODOS DE UTILIDAD ----
+    # MÉTODOS DE UTILIDAD
     def puede_hacer_reservas(self):
         return self.activo
 
@@ -174,7 +174,7 @@ class Jugador(models.Model):
         return jugador
 
 
-# ---- FUNCIONES DE UTILIDAD ----
+#  FUNCIONES DE UTILIDAD
 def obtener_jugador_invitado_disponible():
     return Jugador.objects.disponibles_para_invitados().first()
 
@@ -192,5 +192,9 @@ def crear_jugador_registrado(username, email, first_name, last_name, password, *
             last_name=last_name,
             password=password
         )
-        jugador = Jugador.objects.create(user=user, **kwargs)
+        # La señal ya creó el jugador automáticamente, solo actualizamos los campos adicionales
+        jugador = user.jugador
+        for key, value in kwargs.items():
+            setattr(jugador, key, value)
+        jugador.save()
         return jugador

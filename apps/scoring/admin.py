@@ -1,4 +1,4 @@
-﻿# apps/scoring/admin.py - ACTUALIZADO PARA SERVICES MEJORADO
+﻿# apps/scoring/admin.py
 from django.contrib import admin
 from django.utils.html import format_html
 from .models import Partido, Set, Juego, Punto, HistorialJugador, EstadisticasJugador, Cancha, Reserva
@@ -7,9 +7,7 @@ from django.forms import ModelForm
 from django.db import models
 
 
-# ==========================================
 # ADMIN PARA CANCHA
-# ==========================================
 @admin.register(Cancha)
 class CanchaAdmin(admin.ModelAdmin):
     list_display = [
@@ -183,7 +181,7 @@ class PartidoAdmin(admin.ModelAdmin):
 
     ver_estados_detallados.short_description = "Ver estados detallados"
 
-    # NUEVA ACCION: Validar consistencia
+
     def validar_consistencia(self, request, queryset):
         """Valida la consistencia de los datos de los partidos"""
         for partido in queryset:
@@ -202,7 +200,7 @@ class PartidoAdmin(admin.ModelAdmin):
 
     validar_consistencia.short_description = "Validar consistencia de datos"
 
-    # NUEVA ACCION: Ver estadísticas
+
     def ver_estadisticas(self, request, queryset):
         """Muestra estadísticas detalladas de los partidos"""
         for partido in queryset:
@@ -230,9 +228,8 @@ class PartidoAdmin(admin.ModelAdmin):
     ver_estadisticas.short_description = "Ver estadísticas detalladas"
 
 
-# ==========================================
 # INLINES
-# ==========================================
+
 class JuegoInline(admin.TabularInline):
     model = Juego
     extra = 0
@@ -248,9 +245,8 @@ class PuntoInline(admin.TabularInline):
     fields = ['numero_punto', 'equipo_ganador', 'tipo_punto', 'descripcion', 'timestamp']
 
 
-# ==========================================
 # ADMIN PARA SET
-# ==========================================
+
 @admin.register(Set)
 class SetAdmin(admin.ModelAdmin):
     list_display = ['partido', 'numero_set', 'juegos_equipo1', 'juegos_equipo2', 'finalizado', 'equipo_ganador']
@@ -272,10 +268,8 @@ class SetAdmin(admin.ModelAdmin):
         })
     )
 
-
-# ==========================================
 # ADMIN PARA JUEGO
-# ==========================================
+
 @admin.register(Juego)
 class JuegoAdmin(admin.ModelAdmin):
     list_display = ['set', 'numero_juego', 'puntos_display_equipo1', 'puntos_display_equipo2', 'finalizado',
@@ -286,9 +280,8 @@ class JuegoAdmin(admin.ModelAdmin):
     inlines = [PuntoInline]
 
 
-# ==========================================
 # FORMULARIO PERSONALIZADO PARA PUNTO
-# ==========================================
+
 class PuntoAdminForm(ModelForm):
     """Formulario que filtra solo juegos de partidos en curso"""
 
@@ -316,9 +309,7 @@ class PuntoAdminForm(ModelForm):
             self.fields['juego'].empty_label = "No hay juegos activos - crear partido 'En Juego'"
 
 
-# ==========================================
 # ADMIN PARA PUNTO - ACTUALIZADO PARA SERVICES MEJORADO
-# ==========================================
 @admin.register(Punto)
 class PuntoAdmin(admin.ModelAdmin):
     form = PuntoAdminForm
@@ -395,7 +386,7 @@ class PuntoAdmin(admin.ModelAdmin):
     estado_despues.short_description = 'Resultado'
 
     def resultado_procesamiento(self, obj):
-        """Información sobre el procesamiento del punto - MEJORADO"""
+        """Información sobre el procesamiento del punto """
         if hasattr(obj, '_resultado_procesamiento'):
             resultado = obj._resultado_procesamiento
             info_lines = []
@@ -432,7 +423,7 @@ class PuntoAdmin(admin.ModelAdmin):
     resultado_procesamiento.short_description = 'Procesamiento'
 
     def save_model(self, request, obj, form, change):
-        """Procesamiento automático de puntos - ACTUALIZADO PARA SERVICES MEJORADO"""
+        """Procesamiento automático de puntos """
 
         if not change:  # Solo para puntos nuevos
             try:
@@ -601,9 +592,7 @@ class PuntoAdmin(admin.ModelAdmin):
     ver_historial_detallado.short_description = "Ver historial detallado"
 
 
-# ==========================================
 # ADMIN PARA HISTORIAL
-# ==========================================
 @admin.register(HistorialJugador)
 class HistorialJugadorAdmin(admin.ModelAdmin):
     list_display = ['jugador', 'partido', 'equipo_jugador', 'es_ganador', 'Pareja']
@@ -611,9 +600,7 @@ class HistorialJugadorAdmin(admin.ModelAdmin):
     search_fields = ['jugador__nombre', 'jugador__apellido', 'partido__cancha__nombre']
 
 
-# ==========================================
 # ADMIN PARA ESTADÍSTICAS
-# ==========================================
 @admin.register(EstadisticasJugador)
 class EstadisticasJugadorAdmin(admin.ModelAdmin):
     list_display = ['jugador', 'partidos_jugados', 'partidos_ganados', 'ultima_actualizacion']
@@ -621,10 +608,7 @@ class EstadisticasJugadorAdmin(admin.ModelAdmin):
     search_fields = ['jugador__nombre', 'jugador__apellido']
     readonly_fields = ['ultima_actualizacion']
 
-
-# ==========================================
 # ADMIN PARA RESERVAS
-# ==========================================
 @admin.register(Reserva)
 class ReservaAdmin(admin.ModelAdmin):
     list_display = ['codigo_reserva', 'cancha', 'tipo_reserva', 'estado', 'fecha_inicio', 'fecha_fin', 'pagado',

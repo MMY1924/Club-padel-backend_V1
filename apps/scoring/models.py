@@ -119,7 +119,7 @@ class Partido(models.Model):
     # Configuración del partido
     sets_para_ganar = models.IntegerField(default=2)
 
-    # NUEVOS CAMPOS PARA CONFIGURAR REGLAS
+    # CONFIGURAR REGLAS
     puntos_para_ganar_juego = models.IntegerField(default=4)  # Ej: 4 (juego normal)
     diferencia_minima_puntos = models.IntegerField(default=2)  # Ej: 2 (ventaja)
     juegos_para_ganar_set = models.IntegerField(default=6)  # Ej: 6 (set normal)
@@ -143,9 +143,7 @@ class Partido(models.Model):
         verbose_name_plural = 'Partidos'
         ordering = ['-fecha_creacion']
 
-    # ==========================================
     # NUEVO: Validaciones personalizadas
-    # ==========================================
     def clean(self):
         super().clean()
 
@@ -207,7 +205,7 @@ class Partido(models.Model):
             except Exception as e:
                 logger.error(f"Error asegurando estructura para el partido {self.id}: {e}")
 
-    # MÉTODOS EXISTENTES MODIFICADOS
+
     def __str__(self):
         if self.modalidad == 'Individual':
             return f"{self.jugador1_equipo1.nombre} vs {self.jugador1_equipo2.nombre}"
@@ -639,7 +637,7 @@ class Reserva(models.Model):
                 horario_conflicto = f"{fecha_inicio_conflicto} a {fecha_fin_conflicto}"
 
             raise ValidationError({
-                'fecha_inicio': f'❌ CANCHA OCUPADA - Ya existe la reserva {conflicto.codigo_reserva} Selecciona otro horario disponible.'
+                'fecha_inicio': f' CANCHA OCUPADA - Ya existe la reserva {conflicto.codigo_reserva} Selecciona otro horario disponible.'
             })
 
     def save(self, *args, **kwargs):
