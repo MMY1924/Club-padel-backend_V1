@@ -71,7 +71,7 @@ API REST robusta construida con Django REST Framework que proporciona funcionali
 
 1. **Clonar el repositorio**
 ```bash
-git clone https://gitlab.com/ourala/padel/backend.git
+git clone https://github.com/MMY1924/Clud-padel-backend_V1.git
 cd padel_backend
 ```
 
